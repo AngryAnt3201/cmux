@@ -216,11 +216,29 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
     private static let monokaiBarColor = UIColor(red: 0x27/255.0, green: 0x28/255.0, blue: 0x22/255.0, alpha: 1)
     private static let accessoryHorizontalInset: CGFloat = 16
     private static let accessoryButtonFont = UIFont.systemFont(ofSize: 14, weight: .medium)
-    private static let accessoryButtonSymbolConfig = UIImage.SymbolConfiguration(pointSize: 14, weight: .medium)
-    private static let accessoryButtonContentInsets = NSDirectionalEdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 10)
+    /// One shared SF Symbol config for every icon on the bar (paste, zoom,
+    /// arrows, settings, keyboard toggle) so all glyphs render at one size.
+    /// The point size sits just under the 14pt text font because an SF Symbol's
+    /// bounding box reads larger than text at the same size; 13pt keeps the
+    /// icons visually in line with the text keys instead of looming over them.
+    private static let accessoryButtonSymbolConfig = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+    /// Dedicated, slightly smaller config for the leading composer toggle.
+    /// `square.and.pencil` has a denser, taller bounding box than the
+    /// magnifying-glass/clipboard glyphs, so at the shared 13pt it still loomed
+    /// larger than its neighbors; 11pt brings it visually in line with them.
+    private static let composerButtonSymbolConfig = UIImage.SymbolConfiguration(pointSize: 11, weight: .medium)
+    /// One compact horizontal inset applied to every button so the bar reads
+    /// tight and uniform. Each button then hugs its label/icon plus this inset.
+    private static let accessoryButtonContentInsets = NSDirectionalEdgeInsets(top: 5, leading: 6, bottom: 5, trailing: 6)
     private static let accessoryButtonCornerRadius: CGFloat = 6
     private static let accessoryButtonHeight: CGFloat = 28
-    private static let accessoryButtonMinWidth: CGFloat = 44
+    /// Minimum (not fixed) button width. Text buttons (Tab, Esc, ^C, ^D) size to
+    /// their intrinsic content width and only floor here so they hug their label
+    /// plus the compact inset; single-glyph modifiers/icons take a fixed width so
+    /// they stay uniform. Kept small so short keys do not read as oversized; the
+    /// touch target is comfortable because the 28pt height supplies vertical
+    /// area even when the visible width is tight.
+    private static let accessoryButtonMinWidth: CGFloat = 28
     private static let accessoryButtonNormalBackground = UIColor(white: 0.35, alpha: 1)
     private var accessoryBackgroundLeadingConstraint: NSLayoutConstraint?
     private var accessoryBackgroundTrailingConstraint: NSLayoutConstraint?
@@ -238,8 +256,7 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
 
         // Pinned keyboard dismiss button on the left
         let dismissButton = UIButton(type: .system)
-        let dismissConfig = UIImage.SymbolConfiguration(pointSize: 16, weight: .medium)
-        dismissButton.setImage(UIImage(systemName: "keyboard.chevron.compact.down", withConfiguration: dismissConfig), for: .normal)
+        dismissButton.setImage(UIImage(systemName: "keyboard.chevron.compact.down", withConfiguration: Self.accessoryButtonSymbolConfig), for: .normal)
         dismissButton.tintColor = UIColor(white: 0.7, alpha: 1)
         dismissButton.addTarget(self, action: #selector(handleHideKeyboard), for: .touchUpInside)
         dismissButton.accessibilityIdentifier = "terminal.inputAccessory.hideKeyboard"
@@ -655,9 +672,8 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
     /// glyphs, cross-dissolved, so it reads as a single keyboard toggle.
     func setKeyboardShown(_ shown: Bool) {
         guard let dismissButton else { return }
-        let config = UIImage.SymbolConfiguration(pointSize: 16, weight: .medium)
         let symbol = shown ? "keyboard.chevron.compact.down" : "keyboard"
-        let image = UIImage(systemName: symbol, withConfiguration: config)
+        let image = UIImage(systemName: symbol, withConfiguration: Self.accessoryButtonSymbolConfig)
         UIView.transition(with: dismissButton, duration: 0.2, options: .transitionCrossDissolve) {
             dismissButton.setImage(image, for: .normal)
         }
@@ -709,12 +725,15 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
         applyAccessoryButtonStyle(button, item: .builtin(action), armed: false, sticky: false)
         button.heightAnchor.constraint(equalToConstant: Self.accessoryButtonHeight).isActive = true
         if action.isModifier || action.symbolName != nil {
-            // Single-glyph modifiers (⌃⌥⌘⇧) and icon buttons (zoom) get a fixed
-            // width so they stay uniform — their glyph metrics differ, and a
-            // greater-than-or-equal min-width let some (e.g. the glass capsule)
-            // grow wider than others. Variable-text buttons keep growing.
+            // Single-glyph modifiers (⌃⌥⌘⇧) and icon buttons (zoom/composer/paste)
+            // get a fixed width so they stay uniform — their glyph metrics differ,
+            // and a greater-than-or-equal min-width let some (e.g. the glass
+            // capsule) grow wider than others. Variable-text buttons keep growing.
             button.widthAnchor.constraint(equalToConstant: Self.accessoryButtonMinWidth).isActive = true
         } else {
+            // Text buttons (Tab, Esc, ^C, ^D) hug their intrinsic content (label +
+            // the shared compact inset) and only floor at the tap-target minimum,
+            // so they are as narrow as their text allows.
             button.widthAnchor.constraint(greaterThanOrEqualToConstant: Self.accessoryButtonMinWidth).isActive = true
         }
         return button
@@ -764,6 +783,7 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
         button.configuration = config
         button.tintColor = UIColor(white: 0.7, alpha: 1)
         button.heightAnchor.constraint(equalToConstant: Self.accessoryButtonHeight).isActive = true
+        // Icon-only control: fixed width so it matches the other glyph keys.
         button.widthAnchor.constraint(equalToConstant: Self.accessoryButtonMinWidth).isActive = true
         return button
     }
@@ -798,7 +818,13 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
         }
         if let symbolName {
             config.image = UIImage(systemName: symbolName)
-            config.preferredSymbolConfigurationForImage = Self.accessoryButtonSymbolConfig
+            // The composer's `square.and.pencil` glyph reads heavier than the
+            // other icons, so it takes a slightly smaller config to sit in line.
+            let isComposer: Bool
+            if case .builtin(.composer) = item { isComposer = true } else { isComposer = false }
+            config.preferredSymbolConfigurationForImage = isComposer
+                ? Self.composerButtonSymbolConfig
+                : Self.accessoryButtonSymbolConfig
             config.attributedTitle = nil
         } else {
             var attributed = AttributedString(title)
