@@ -21,13 +21,6 @@ struct WorkspaceDetailView: View {
     let reportTerminalViewport: (MobileWorkspacePreview.ID, MobileTerminalPreview.ID, MobileTerminalViewportSize) -> Void
     let sendTerminalInput: (String) -> Void
     let safeAreaContext: MobileTerminalSafeAreaContext
-    #if os(iOS)
-    /// Cross-layer handle: the surface publishes its docked toolbar here while the
-    /// composer is open so the composer can host it below its field (round 5 order:
-    /// terminal / composer / toolbar / keyboard). One instance per detail view,
-    /// shared by the surface representable and the composer.
-    @State private var toolbarHandoff = ComposerToolbarHandoff()
-    #endif
     #if DEBUG && canImport(UIKit)
     @State private var isFeedbackComposerPresented = false
     @State private var feedbackText = ""
@@ -61,8 +54,7 @@ struct WorkspaceDetailView: View {
                     // hidden terminal input proxy grab first responder back.
                     autoFocusOnWindowAttach: store.shouldAutoFocusTerminalSurface(terminalID)
                         && !store.isComposerPresented,
-                    isComposerActive: store.isComposerPresented,
-                    toolbarHandoff: toolbarHandoff
+                    isComposerActive: store.isComposerPresented
                 )
                 // Identity must track the selected terminal. The representable's
                 // coordinator binds its byte sink to the surfaceID at make time and
@@ -97,30 +89,15 @@ struct WorkspaceDetailView: View {
                 .padding(.leading, 10)
         }
         #if os(iOS)
-        // Round 6: the compose field and the docked accessory toolbar are TWO stacked
-        // bottom insets, not one VStack inside one inset (round 5). SwiftUI applies the
-        // toolbar inset SECOND so it lands OUTERMOST — directly on the keyboard top —
-        // and applies the field inset FIRST so it lands INNER, just above the toolbar.
-        // A field-grow changes only the (inner) field inset's height, pushing the
-        // terminal up; the constant-height toolbar inset is structurally pinned to the
-        // keyboard top and cannot drift. This is the deterministic re-approach to the
-        // twice-failed "toolbar moves when the composer grows" bug: the toolbar's slot
-        // is decoupled from the field's height by construction.
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if store.isComposerPresented {
-                TerminalComposerView(store: store)
-            }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            if store.isComposerPresented, let toolbar = toolbarHandoff.toolbarView {
-                // Full-bleed, constant-height toolbar pinned at the keyboard top. The
-                // host frames it to the same band the in-surface dock reserves
-                // (`dockedToolbarHeight`), so the surface path and this composer path
-                // agree on the toolbar's size.
-                ComposerDockedToolbarHost(toolbarView: toolbar)
-                    .frame(height: GhosttySurfaceView.dockedToolbarHeight)
-            }
-        }
+        // The whole bottom dock (terminal grid / composer band / accessory toolbar /
+        // keyboard) is owned by `GhosttySurfaceView` in one coordinate system. The
+        // iMessage composer is mounted INTO the surface's composer band by
+        // `GhosttySurfaceRepresentable` (a `UIHostingController`), not added here as a
+        // `safeAreaInset`. That deletes the round-5/6 two-stacked-insets-plus-toolbar-
+        // handoff that fought the surface's frame math: there is no second layout
+        // system reaching into the surface's bottom, so the accessory toolbar can never
+        // be reparented out (its buttons can never disappear) and a composer-grow pushes
+        // only the terminal up.
         .mobileTerminalSafeAreaExpansion(
             context: safeAreaContext,
             includesBottom: true

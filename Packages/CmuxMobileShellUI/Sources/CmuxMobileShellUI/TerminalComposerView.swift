@@ -5,7 +5,7 @@ import CmuxMobileSupport
 import CmuxMobileTerminal
 import SwiftUI
 
-/// iMessage-style composer pinned above the terminal.
+/// iMessage-style composer hosted in the terminal surface's composer band.
 ///
 /// A growing multi-line text field plus a send button, rendered with Liquid
 /// Glass (iOS 26+, with a thin-material fallback). Send delivers the text as a
@@ -14,35 +14,39 @@ import SwiftUI
 /// interior newline. Toggled from the input accessory bar's composer button; the
 /// chevron dismisses it.
 ///
-/// Round 6 stacks the compose field and the terminal's docked accessory toolbar
-/// (modifier / arrow / Ctrl row) as TWO separate bottom `safeAreaInset`s in
-/// ``WorkspaceDetailView`` (field inset applied first / inner, toolbar inset applied
-/// second / outer, pinned at keyboard top). This view is the field inset only; the
-/// toolbar host (``ComposerDockedToolbarHost``) is a sibling inset. Splitting them
-/// means a field-grow changes only the field inset's height (pushing the terminal up)
-/// and structurally cannot move the constant-height toolbar inset off the keyboard
-/// top — round 5 put both in one VStack inside one inset, where the whole stack
-/// reflowed as a unit on every keystroke and the toolbar drifted. The toolbar is
-/// still the same single surface view, borrowed via ``ComposerToolbarHandoff``.
+/// The bottom dock (terminal grid / composer band / accessory toolbar / keyboard)
+/// is owned entirely by `GhosttySurfaceView` in one coordinate system. This view is
+/// hosted in a `UIHostingController` that `GhosttySurfaceRepresentable` installs into
+/// the surface's composer band, directly above the always-visible accessory toolbar.
+/// The view reports its measured height through ``onHeightChange`` so the surface can
+/// reserve exactly that much above the toolbar; a field-grow therefore pushes ONLY the
+/// terminal up while the toolbar and keyboard below stay put. There is no
+/// `safeAreaInset` and no toolbar handoff — the prior rounds' two-layout-systems fight
+/// is gone because there is only one layout system (the surface).
 struct TerminalComposerView: View {
     @Bindable var store: CMUXMobileShellStore
+    /// Asks the host to re-measure and re-size the surface's composer band. Fired
+    /// whenever the field's content changes (the only driver of this view's height);
+    /// the host measures the ideal height via `sizeThatFits` and animates the band.
+    let requestHeightRemeasure: () -> Void
     @FocusState private var isFieldFocused: Bool
+
+    init(store: CMUXMobileShellStore, requestHeightRemeasure: @escaping () -> Void) {
+        self.store = store
+        self.requestHeightRemeasure = requestHeightRemeasure
+    }
 
     /// Single-line height of the round close/send buttons. They stay pinned to the
     /// bottom edge of the (taller) field via the `HStack`'s `.bottom` alignment.
     private let controlHeight: CGFloat = 40
 
-    /// Line range for the growing compose field. Round 5 opens it at a SINGLE line
-    /// (`1...`) so it starts as a compact one-line message box and grows as the user
-    /// types, up to 14 lines before scrolling. Each added line pushes the terminal
-    /// up while the toolbar (now docked BELOW the field) stays pinned to the
-    /// keyboard edge.
+    /// Line range for the growing compose field. Opens at a SINGLE line (`1...`) so it
+    /// starts as a compact one-line message box and grows as the user types, up to 14
+    /// lines before scrolling. Each added line grows this view's height, which the host
+    /// reserves above the toolbar, pushing only the terminal up.
     private let composerLineLimit = 1...14
 
-    /// Minimum height of the compose field. Round 5 drops it to one control height
-    /// so the composer opens at a single line (matching ``composerLineLimit``'s new
-    /// `1...` lower bound) instead of a forced multi-line box. It still grows with
-    /// content up to ``composerLineLimit``.
+    /// Minimum height of the compose field, matching the one-line baseline.
     private let composerFieldMinHeight: CGFloat = 40
 
     private var trimmedIsEmpty: Bool {
@@ -50,11 +54,16 @@ struct TerminalComposerView: View {
     }
 
     var body: some View {
-        // Field only (round 6). The docked toolbar is a SEPARATE outer bottom inset
-        // in ``WorkspaceDetailView`` so a field-grow cannot move it (see this view's
-        // doc comment). Growing this field grows this inset, which pushes the terminal
-        // up; the toolbar inset below stays pinned to the keyboard top.
         composerSurface
+        // The field is pinned edge-to-edge inside the surface's composer band, so its
+        // outer size is locked to the band height and cannot report its own growth.
+        // The field's height is driven solely by its content, so ask the host to
+        // re-measure (via `sizeThatFits`, which returns the ideal height independent of
+        // the current frame) whenever the text changes — the grow as the user types and
+        // the shrink when the field is cleared after a send.
+        .onChange(of: store.terminalInputText) { _, _ in
+            requestHeightRemeasure()
+        }
         .onAppear {
             recordComposerEvent(.composerViewAppear)
             focusField()
@@ -118,10 +127,9 @@ struct TerminalComposerView: View {
                 text: $store.terminalInputText,
                 axis: .vertical
             )
-            // Draft mode keeps the docked toolbar visible (the bar no longer hides
-            // when the composer opens), and the composer is the taller surface: it
-            // starts at a comfortable multi-line height and grows up to 14 lines so
-            // a long message has room instead of the bar disappearing to make space.
+            // Opens at a single line and grows up to 14 lines so a long message has
+            // room. Each added line grows this view, which the host reserves above the
+            // always-visible toolbar; the toolbar and keyboard never move.
             .lineLimit(composerLineLimit)
             .textInputAutocapitalization(.never)
             .autocorrectionDisabled(true)

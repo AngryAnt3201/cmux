@@ -12,6 +12,16 @@ import UIKit
 /// runs the same libghostty terminal core + Metal renderer as the Mac,
 /// fed by the Mac's own read thread byte-for-byte. No Swift VT parser,
 /// no snapshot rehydration, no cell-by-cell SwiftUI tree.
+///
+/// The bottom dock (terminal grid / composer band / accessory toolbar / keyboard)
+/// is owned entirely by the `GhosttySurfaceView` in one coordinate system. The
+/// iMessage-style composer is a SwiftUI view, so it is hosted in a
+/// `UIHostingController` and installed into the surface's composer band; this
+/// representable is the only layer that can see both the terminal package and the
+/// shell-UI composer, so it owns that bridge. The surface owns the band's position
+/// and the grid reservation; the host reports the field's measured height back so a
+/// field-grow pushes only the terminal up. There is no toolbar handoff and no second
+/// layout system reaching into the surface's bottom math.
 struct GhosttySurfaceRepresentable: UIViewRepresentable {
     let surfaceID: String
     let store: CMUXMobileShellStore
@@ -21,20 +31,14 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
     /// actions (create workspace/terminal, switch terminal) do not pop the
     /// software keyboard.
     var autoFocusOnWindowAttach: Bool = true
-    /// Whether the SwiftUI composer is open. Forwarded to
-    /// `GhosttySurfaceView.setComposerActive`, which relinquishes the docked
-    /// accessory toolbar to the composer while open and pulls first responder back to
-    /// the terminal input when the composer closes so the keyboard stays up across
-    /// the toggle.
+    /// Whether the iMessage-style composer is open. When it flips on, the
+    /// coordinator mounts the SwiftUI compose field into the surface's composer
+    /// band and pins first responder so the keyboard hands over in place; when it
+    /// flips off, the field is unmounted and the band collapses to zero height.
     var isComposerActive: Bool = false
-    /// Cross-layer handle the composer reads to host the docked toolbar below its
-    /// field (round 5 order: terminal / composer / toolbar / keyboard). This
-    /// representable publishes the surface's `dockedToolbarView` into it while the
-    /// composer is active and clears it when the composer closes.
-    var toolbarHandoff: ComposerToolbarHandoff
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(surfaceID: surfaceID, store: store, toolbarHandoff: toolbarHandoff)
+        Coordinator(surfaceID: surfaceID, store: store)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -61,34 +65,33 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
         // "Send to agent" feedback pane exports. `nil` until P1's log is wired.
         view.diagnosticLog = store.diagnosticLog
         #endif
-        // Publish the docked toolbar to the handoff at creation — before any
-        // composer sibling is mounted to read it — so the cross-layer reference is
-        // set without a "modifying state during view update" invalidation. The
-        // composer reads it (round 5 stacking order) only once it opens.
-        toolbarHandoff.toolbarView = view.dockedToolbarView
         context.coordinator.attach(surfaceView: view)
+        // Mount the composer band immediately if the composer was already open when
+        // this surface was (re)built (e.g. a terminal switch while composing).
+        context.coordinator.setComposerMounted(isComposerActive)
         return view
     }
 
     func updateUIView(_ uiView: UIView, context: Context) {
-        // Bytes flow via the byte sink; the prop-driven mutations are the
-        // autofocus suppression and the composer's claim on the bottom edge +
-        // keyboard. `setComposerActive` checks the toolbar out of the surface (when
-        // opening) or re-adopts it (when closing); the toolbar reference itself was
-        // already published at `makeUIView`, so the composer (which only mounts the
-        // toolbar host while open) finds it ready. This is a UIKit-internal mutation,
-        // not a sibling-observed state write, so it is safe in `updateUIView`.
+        // Bytes flow via the byte sink; the prop-driven mutations are the autofocus
+        // suppression and the composer's open/closed state. `setComposerActive`
+        // handles the first-responder handover that keeps the keyboard up; the
+        // coordinator mounts/unmounts the hosted compose field into the surface's
+        // composer band. This is a UIKit-internal mutation, not a sibling-observed
+        // state write, so it is safe in `updateUIView`.
         guard let surfaceView = uiView as? GhosttySurfaceView else { return }
         surfaceView.autoFocusOnWindowAttach = autoFocusOnWindowAttach
         surfaceView.setComposerActive(isComposerActive)
+        context.coordinator.setComposerMounted(isComposerActive)
+        // A width change (rotation) is not a text change, so the field-content trigger
+        // misses it. Re-measure the open composer here so the band height tracks the new
+        // width's wrapping. No-op when closed or when the height is unchanged.
+        context.coordinator.remeasureComposerForLayoutChange()
     }
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
         (uiView as? GhosttySurfaceView)?.prepareForDismantle()
-        // The surface is gone, so drop the published toolbar reference. Safe here:
-        // dismantle runs when the representable leaves the tree, not during a sibling
-        // view update.
-        coordinator.toolbarHandoff?.toolbarView = nil
+        coordinator.tearDownComposer()
         coordinator.detach()
     }
 
@@ -96,13 +99,16 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
         let surfaceID: String
         weak var store: CMUXMobileShellStore?
         weak var surfaceView: GhosttySurfaceView?
-        weak var toolbarHandoff: ComposerToolbarHandoff?
         private var outputTask: Task<Void, Never>?
+        /// Hosts the SwiftUI ``TerminalComposerView`` so it can be installed into the
+        /// surface's composer band. Built lazily on first open and torn down on
+        /// dismantle; mounted/unmounted by ``setComposerMounted(_:)``.
+        private var composerController: UIHostingController<TerminalComposerView>?
+        private var composerMounted = false
 
-        init(surfaceID: String, store: CMUXMobileShellStore, toolbarHandoff: ComposerToolbarHandoff) {
+        init(surfaceID: String, store: CMUXMobileShellStore) {
             self.surfaceID = surfaceID
             self.store = store
-            self.toolbarHandoff = toolbarHandoff
             super.init()
         }
 
@@ -124,6 +130,83 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
         func detach() {
             outputTask?.cancel()
             outputTask = nil
+        }
+
+        // MARK: - Composer band hosting
+
+        /// Mount or unmount the SwiftUI compose field into the surface's composer
+        /// band so the surface owns its position and grid reservation. Idempotent.
+        @MainActor
+        func setComposerMounted(_ mounted: Bool) {
+            guard mounted != composerMounted, let store, let surfaceView else { return }
+            composerMounted = mounted
+            if mounted {
+                let controller = composerController ?? makeComposerController(store: store)
+                composerController = controller
+                surfaceView.mountComposerView(controller.view)
+                // The field opens at one line; report its initial height without
+                // animation (the composer's open transition already animates), then
+                // live grows/shrinks animate.
+                reportComposerHeight(animated: false)
+            } else {
+                surfaceView.mountComposerView(nil)
+                surfaceView.setComposerBandHeight(0, animated: true)
+            }
+        }
+
+        /// Build the hosting controller for the compose field. The field asks for a
+        /// re-measure (via ``reportComposerHeight(animated:)``) whenever its content
+        /// changes; the coordinator measures the ideal height with `sizeThatFits` and
+        /// sizes the surface band.
+        @MainActor
+        private func makeComposerController(store: CMUXMobileShellStore) -> UIHostingController<TerminalComposerView> {
+            let view = TerminalComposerView(store: store) { [weak self] in
+                // Content changed (a line added/removed, or cleared after send): live
+                // grows/shrinks animate. `setComposerBandHeight` is idempotent on
+                // unchanged heights, so a no-op change is harmless.
+                self?.reportComposerHeight(animated: true)
+            }
+            let controller = UIHostingController(rootView: view)
+            // The field is pinned edge-to-edge in the band, so the band frame (not an
+            // intrinsic size) drives the hosting view's height; the measured ideal
+            // height flows separately through `sizeThatFits`. Clear background so the
+            // terminal/glass shows through.
+            controller.view.backgroundColor = .clear
+            return controller
+        }
+
+        /// Measure the hosted compose field's ideal height and size the surface band.
+        /// `sizeThatFits` returns the height the content wants independent of the band's
+        /// current (pinned) frame, so it is not circular: the band height is set FROM
+        /// this measurement, and the measurement does not depend on the band height.
+        /// The proposed width is the surface width and the proposed height is unbounded
+        /// so a multi-line field measures its full desired height (capped to 14 lines by
+        /// the field's own `lineLimit`).
+        @MainActor
+        private func reportComposerHeight(animated: Bool) {
+            guard let controller = composerController, let surfaceView else { return }
+            let width = max(1, surfaceView.bounds.width)
+            let target = CGSize(width: width, height: .greatestFiniteMagnitude)
+            let fitting = controller.sizeThatFits(in: target)
+            surfaceView.setComposerBandHeight(fitting.height, animated: animated)
+        }
+
+        /// Re-measure the open composer after a non-text layout change (rotation /
+        /// width change). A no-op when the composer is closed; `setComposerBandHeight`
+        /// is idempotent on an unchanged height. Animated so a rotation reflow is smooth.
+        @MainActor
+        func remeasureComposerForLayoutChange() {
+            guard composerMounted else { return }
+            reportComposerHeight(animated: true)
+        }
+
+        /// Tear the hosting controller down on dismantle so a removed surface does not
+        /// leave a detached SwiftUI host alive.
+        @MainActor
+        func tearDownComposer() {
+            surfaceView?.mountComposerView(nil)
+            composerController = nil
+            composerMounted = false
         }
 
         // MARK: - GhosttySurfaceViewDelegate
@@ -233,8 +316,18 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
 
         func ghosttySurfaceViewDidRequestComposerDismiss(_ surfaceView: GhosttySurfaceView) {
             // The keyboard-dismiss button was tapped while the composer was open.
-            // Close the composer outright (round 5 edge-case fix) so it can never be
-            // left presented with the keyboard down.
+            // Close the composer outright so it can never be left presented with the
+            // keyboard down.
+            Task { @MainActor [weak store] in
+                store?.dismissComposer()
+            }
+        }
+
+        func ghosttySurfaceViewDidCollapseKeyboard(_ surfaceView: GhosttySurfaceView) {
+            // The keyboard fully collapsed by ANY path (dismiss button, swipe-down,
+            // hardware keyboard, backgrounding). Collapse the composer too so
+            // `composerPresented ⇒ keyboardUp` holds by construction. Idempotent: a
+            // no-op when the composer is already closed.
             Task { @MainActor [weak store] in
                 store?.dismissComposer()
             }

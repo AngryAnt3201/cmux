@@ -277,7 +277,7 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
         let container = UIView()
         container.backgroundColor = .clear
         // Placeholder height until the host positions the bar via
-        // `dockedToolbarFrame()`; sized to the button-row strip so the pre-layout
+        // `GhosttySurfaceView.bottomDockFrames()`; sized to the button-row strip so the pre-layout
         // frame matches the reserved grid height.
         container.frame = CGRect(x: 0, y: 0, width: 0, height: Self.dockedButtonRowHeight)
 
@@ -341,7 +341,7 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
         // A short fixed-height strip pinned to the container's BOTTOM (minus
         // ``dockedBottomPadding``) that holds the button row. Round 6 flips this from
         // a top-pin to a bottom-pin: the docked container can be TALLER than this
-        // strip, because the host (`GhosttySurfaceView.dockedToolbarFrame`) anchors
+        // strip, because the host (`GhosttySurfaceView.bottomDockFrames`) anchors
         // the bar's TOP to the rendered terminal's bottom and its BOTTOM to the
         // keyboard top, so a letterbox/resize that pushes the rendered terminal up
         // grows the container upward. Bottom-pinning the controls keeps them glued to
