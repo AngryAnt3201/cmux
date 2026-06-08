@@ -19,6 +19,9 @@ struct DogfoodPaneOverlayView: View {
     /// The pill's free-drag offset from its default bottom-trailing anchor.
     @State private var dragOffset: CGSize = .zero
     @State private var accumulatedOffset: CGSize = CGSize(width: -16, height: -120)
+    /// True while a pill drag has moved past ``tapSlop``; used to suppress the
+    /// tap-to-expand on gesture end so a drag never also toggles the overlay.
+    @State private var isDragging = false
 
     var body: some View {
         GeometryReader { proxy in
@@ -36,7 +39,10 @@ struct DogfoodPaneOverlayView: View {
                 } else {
                     pill
                         .offset(currentOffset(in: proxy.size))
-                        .gesture(dragGesture(in: proxy.size))
+                        // One gesture owns both drag and tap (minimumDistance 0) so
+                        // it cannot fight a separate Button tap recognizer — that
+                        // conflict is what made the old pill feel un-draggable.
+                        .gesture(pillGesture(in: proxy.size))
                 }
             }
             .animation(.snappy(duration: 0.18), value: model.isExpanded)
@@ -46,26 +52,33 @@ struct DogfoodPaneOverlayView: View {
 
     // MARK: - Pill
 
+    /// The draggable bug pill. Not a `Button`: a single ``pillGesture``
+    /// distinguishes a tap (open the overlay) from a drag (reposition it), which
+    /// avoids the SwiftUI gotcha where a `Button` swallows the drag and the pill
+    /// reads as stuck in place.
     private var pill: some View {
-        Button {
-            model.toggleExpanded()
-        } label: {
-            Image(systemName: "ladybug.fill")
-                .font(.system(size: 18, weight: .bold))
-                .foregroundStyle(.white)
-                .frame(width: 44, height: 44)
-                .background(Circle().fill(Color.pink.opacity(0.9)))
-                .overlay(Circle().stroke(.white.opacity(0.5), lineWidth: 1))
-                .shadow(radius: 4, y: 2)
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("DogfoodPanePill")
+        Image(systemName: "ladybug.fill")
+            .font(.system(size: 18, weight: .bold))
+            .foregroundStyle(.white)
+            .frame(width: Self.pillSize, height: Self.pillSize)
+            .background(Circle().fill(Color.pink.opacity(0.95)))
+            .overlay(Circle().stroke(.white.opacity(isDragging ? 0.9 : 0.5), lineWidth: isDragging ? 2 : 1))
+            .scaleEffect(isDragging ? 1.12 : 1)
+            .shadow(radius: isDragging ? 8 : 4, y: 2)
+            .contentShape(Circle())
+            .animation(.snappy(duration: 0.12), value: isDragging)
+            .accessibilityIdentifier("DogfoodPanePill")
+            .accessibilityLabel("Dogfood feedback")
+            .accessibilityAddTraits(.isButton)
     }
 
     /// The pill's hit-target size; also the basis for keeping it on-screen.
     private static let pillSize: CGFloat = 44
     /// Minimum on-screen inset so the pill never sits flush against an edge.
     private static let pillEdgeMargin: CGFloat = 8
+    /// Movement below this (points) counts as a tap, not a drag, so a slightly
+    /// imprecise tap still opens the overlay instead of nudging the pill.
+    private static let tapSlop: CGFloat = 6
 
     private func currentOffset(in size: CGSize) -> CGSize {
         clampedOffset(
@@ -90,21 +103,35 @@ struct DogfoodPaneOverlayView: View {
         )
     }
 
-    private func dragGesture(in size: CGSize) -> some Gesture {
-        DragGesture()
+    /// A single drag-or-tap gesture. `minimumDistance: 0` makes it claim the touch
+    /// immediately (so a drag starts without the touch being eaten by a button),
+    /// while ``tapSlop`` decides at end time whether the finger moved enough to be
+    /// a reposition or stayed put as a tap that opens the overlay.
+    private func pillGesture(in size: CGSize) -> some Gesture {
+        DragGesture(minimumDistance: 0)
             .onChanged { value in
-                dragOffset = value.translation
+                let moved = max(abs(value.translation.width), abs(value.translation.height))
+                if moved > Self.tapSlop { isDragging = true }
+                if isDragging { dragOffset = value.translation }
             }
             .onEnded { value in
-                // Persist the clamped offset so the pill cannot be lost off-screen.
-                accumulatedOffset = clampedOffset(
-                    CGSize(
-                        width: accumulatedOffset.width + value.translation.width,
-                        height: accumulatedOffset.height + value.translation.height
-                    ),
-                    in: size
-                )
+                let moved = max(abs(value.translation.width), abs(value.translation.height))
+                if isDragging || moved > Self.tapSlop {
+                    // A real drag: persist the clamped offset so the pill cannot be
+                    // lost off-screen, and do not also toggle the overlay.
+                    accumulatedOffset = clampedOffset(
+                        CGSize(
+                            width: accumulatedOffset.width + value.translation.width,
+                            height: accumulatedOffset.height + value.translation.height
+                        ),
+                        in: size
+                    )
+                } else {
+                    // A tap in place: open the overlay.
+                    model.toggleExpanded()
+                }
                 dragOffset = .zero
+                isDragging = false
             }
     }
 
