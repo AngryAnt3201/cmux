@@ -28,6 +28,11 @@ struct DogfoodPaneOverlayView: View {
     /// lifted scale/stroke. The `TapGesture` and `DragGesture` are independent, so
     /// this no longer gates tap-to-expand — it is purely a visual cue.
     @State private var isDragging = false
+    /// Measured size of the expanded card, so its drag clamp keeps the WHOLE card
+    /// on-screen (the pill clamp uses the 44pt pill size, which would strand most of
+    /// the card off-screen). Falls back to a reasonable estimate before first
+    /// measurement.
+    @State private var cardSize: CGSize = CGSize(width: 320, height: 320)
 
     var body: some View {
         GeometryReader { proxy in
@@ -40,9 +45,21 @@ struct DogfoodPaneOverlayView: View {
                     .allowsHitTesting(false)
 
                 if model.isExpanded {
-                    expandedCard
+                    expandedCard(in: proxy.size)
                         .frame(maxWidth: min(360, proxy.size.width - 24))
                         .padding(12)
+                        .onGeometryChange(for: CGSize.self) { $0.size } action: { newSize in
+                            // Measure the rendered card (including the padding) so the
+                            // drag clamp keeps the whole panel on-screen.
+                            cardSize = newSize
+                        }
+                        // The expanded panel is repositionable too (round 5): it
+                        // reads the SAME `accumulatedOffset` as the pill, with a
+                        // card-size-aware clamp, so dragging the card and dragging the
+                        // pill move one shared anchor and stay in sync across
+                        // expand/collapse. `currentOffset` re-clamps per mode, so the
+                        // shared anchor self-corrects when the smaller pill returns.
+                        .offset(currentCardOffset(in: proxy.size))
                         .transition(.scale(scale: 0.92).combined(with: .opacity))
                 } else {
                     pill
@@ -105,17 +122,32 @@ struct DogfoodPaneOverlayView: View {
                 width: accumulatedOffset.width + dragOffset.width,
                 height: accumulatedOffset.height + dragOffset.height
             ),
-            in: size
+            in: size,
+            contentSize: CGSize(width: Self.pillSize, height: Self.pillSize)
         )
     }
 
-    /// Clamp an offset (relative to the top-leading anchor) so the pill stays
-    /// fully within the scene. The pill is the only affordance that reopens the
-    /// overlay, so a long drag must not strand it off-screen with no hittable
-    /// control left. Positive width moves right, positive height moves down.
-    private func clampedOffset(_ offset: CGSize, in size: CGSize) -> CGSize {
-        let maxWidth = max(Self.pillEdgeMargin, size.width - Self.pillSize - Self.pillEdgeMargin)
-        let maxHeight = max(Self.pillEdgeMargin, size.height - Self.pillSize - Self.pillEdgeMargin)
+    /// The expanded card's live offset, clamped with the card's measured size so
+    /// the whole panel stays on-screen. Shares ``accumulatedOffset`` with the pill.
+    private func currentCardOffset(in size: CGSize) -> CGSize {
+        clampedOffset(
+            CGSize(
+                width: accumulatedOffset.width + dragOffset.width,
+                height: accumulatedOffset.height + dragOffset.height
+            ),
+            in: size,
+            contentSize: cardSize
+        )
+    }
+
+    /// Clamp an offset (relative to the top-leading anchor) so the dragged content
+    /// of `contentSize` stays fully within the scene. Both the pill (the only
+    /// affordance that reopens the overlay) and the expanded card share this anchor,
+    /// so a long drag must never strand either off-screen. Positive width moves
+    /// right, positive height moves down.
+    private func clampedOffset(_ offset: CGSize, in size: CGSize, contentSize: CGSize) -> CGSize {
+        let maxWidth = max(Self.pillEdgeMargin, size.width - contentSize.width - Self.pillEdgeMargin)
+        let maxHeight = max(Self.pillEdgeMargin, size.height - contentSize.height - Self.pillEdgeMargin)
         return CGSize(
             width: min(maxWidth, max(Self.pillEdgeMargin, offset.width)),
             height: min(maxHeight, max(Self.pillEdgeMargin, offset.height))
@@ -128,6 +160,23 @@ struct DogfoodPaneOverlayView: View {
     /// translation is tracked in ``dragOffset`` and persisted (clamped on-screen)
     /// on release so the pill can never be stranded off-screen.
     private func pillDragGesture(in size: CGSize) -> some Gesture {
+        repositionGesture(in: size, contentSize: CGSize(width: Self.pillSize, height: Self.pillSize))
+    }
+
+    /// Reposition gesture for the expanded card, dragged by its header. Shares the
+    /// pill's ``accumulatedOffset`` so the two stay in sync, and clamps with the
+    /// card's measured size so the whole panel stays on-screen.
+    private func cardDragGesture(in size: CGSize) -> some Gesture {
+        repositionGesture(in: size, contentSize: cardSize)
+    }
+
+    /// Shared reposition gesture used by both the pill and the expanded card. A real
+    /// ``dragThreshold`` of movement is required before it claims the touch, so a
+    /// clean tap is left to the `TapGesture`/`Button` (no zero-translation tap branch
+    /// here to misfire). Live translation is tracked in ``dragOffset`` and persisted
+    /// (clamped on-screen for `contentSize`) into the shared ``accumulatedOffset`` on
+    /// release.
+    private func repositionGesture(in size: CGSize, contentSize: CGSize) -> some Gesture {
         DragGesture(minimumDistance: Self.dragThreshold)
             .onChanged { value in
                 isDragging = true
@@ -139,7 +188,8 @@ struct DogfoodPaneOverlayView: View {
                         width: accumulatedOffset.width + value.translation.width,
                         height: accumulatedOffset.height + value.translation.height
                     ),
-                    in: size
+                    in: size,
+                    contentSize: contentSize
                 )
                 dragOffset = .zero
                 isDragging = false
@@ -148,9 +198,9 @@ struct DogfoodPaneOverlayView: View {
 
     // MARK: - Expanded card
 
-    private var expandedCard: some View {
+    private func expandedCard(in sceneSize: CGSize) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            header
+            header(in: sceneSize)
             // Value-snapshot section so a note keystroke does not invalidate the
             // checklist rows (snapshot-boundary rule).
             DogfoodChecklistSection(
@@ -173,8 +223,17 @@ struct DogfoodPaneOverlayView: View {
         )
     }
 
-    private var header: some View {
-        HStack {
+    private func header(in sceneSize: CGSize) -> some View {
+        HStack(spacing: 8) {
+            // Grab handle: dragging the header (the title region) repositions the
+            // whole panel, sharing the pill's anchor. A `contentShape` makes the
+            // title + leading area the draggable surface; the close button keeps its
+            // own tap. The drag has a movement threshold so a tap on the title is
+            // not swallowed.
+            Image(systemName: "line.3.horizontal")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(.secondary)
+                .accessibilityHidden(true)
             Label(model.checklist.title ?? "Dogfood", systemImage: "ladybug.fill")
                 .font(.headline)
                 .lineLimit(1)
@@ -189,6 +248,10 @@ struct DogfoodPaneOverlayView: View {
             .buttonStyle(.plain)
             .accessibilityIdentifier("DogfoodPaneCollapse")
         }
+        // Make the whole header strip (minus the close button's own hit area) the
+        // drag handle for repositioning the expanded panel.
+        .contentShape(Rectangle())
+        .gesture(cardDragGesture(in: sceneSize))
     }
 
     private var noteSection: some View {

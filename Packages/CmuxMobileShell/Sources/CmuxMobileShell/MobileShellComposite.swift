@@ -1967,6 +1967,15 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
         isComposerPresented.toggle()
     }
 
+    /// Dismiss the iMessage-style composer if it is open. Used when the user hides
+    /// the keyboard while composing, so the composer can never be left presented
+    /// with the keyboard down (round 5 edge-case fix). Idempotent: a no-op when the
+    /// composer is already closed.
+    public func dismissComposer() {
+        guard isComposerPresented else { return }
+        isComposerPresented = false
+    }
+
     /// Submit the composer's text to the selected terminal as a bracketed paste
     /// plus a single Return, then clear the field while keeping the composer
     /// open. Unlike ``submitTerminalInput()``, this delivers a multi-line block

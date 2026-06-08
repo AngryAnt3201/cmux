@@ -22,6 +22,13 @@ struct WorkspaceDetailView: View {
     let sendTerminalInput: (String) -> Void
     let safeAreaContext: MobileTerminalSafeAreaContext
     @State private var isTerminalPickerPresented = false
+    #if os(iOS)
+    /// Cross-layer handle: the surface publishes its docked toolbar here while the
+    /// composer is open so the composer can host it below its field (round 5 order:
+    /// terminal / composer / toolbar / keyboard). One instance per detail view,
+    /// shared by the surface representable and the composer.
+    @State private var toolbarHandoff = ComposerToolbarHandoff()
+    #endif
     #if DEBUG && canImport(UIKit)
     @State private var isFeedbackComposerPresented = false
     @State private var feedbackText = ""
@@ -55,7 +62,8 @@ struct WorkspaceDetailView: View {
                     // hidden terminal input proxy grab first responder back.
                     autoFocusOnWindowAttach: store.shouldAutoFocusTerminalSurface(terminalID)
                         && !store.isComposerPresented,
-                    isComposerActive: store.isComposerPresented
+                    isComposerActive: store.isComposerPresented,
+                    toolbarHandoff: toolbarHandoff
                 )
                 // Identity must track the selected terminal. The representable's
                 // coordinator binds its byte sink to the surfaceID at make time and
@@ -92,7 +100,7 @@ struct WorkspaceDetailView: View {
         #if os(iOS)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if store.isComposerPresented {
-                TerminalComposerView(store: store)
+                TerminalComposerView(store: store, toolbarHandoff: toolbarHandoff)
             }
         }
         .mobileTerminalSafeAreaExpansion(

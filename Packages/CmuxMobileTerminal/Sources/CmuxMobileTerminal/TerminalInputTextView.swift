@@ -234,10 +234,12 @@ final class TerminalInputTextView: UIView, UIKeyInput, UITextInput {
     private static let accessoryButtonHeight: CGFloat = 28
     /// Size of the directional arrow nub (the tallest control in the bar). The
     /// button-row strip is sized to exactly this so the nub fills the strip with no
-    /// slack above it, and the host reserves exactly this much grid height. Round 4
-    /// dropped it from 34 to 32 to shave a couple more points off the bar around the
-    /// d-pad while keeping it a comfortable tap target.
-    static let dockedNubSize: CGFloat = 32
+    /// slack above it, and the host reserves exactly this much grid height. Round 5
+    /// drops it from 32 to 28 (flush with ``accessoryButtonHeight``, the floor below
+    /// which the 28pt buttons would clip the strip) so the bar — and the reserved
+    /// grid band above the keyboard — is as short as it can be while every control
+    /// stays a comfortable tap target.
+    static let dockedNubSize: CGFloat = 28
     /// Fixed height of the docked bar's button row, pinned to the container's top.
     /// Sized to exactly the tallest control (the arrow nub, ``dockedNubSize``), NOT
     /// the full height the grid used to reserve. The controls center on this tight

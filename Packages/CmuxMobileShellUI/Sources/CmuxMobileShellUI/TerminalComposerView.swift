@@ -2,6 +2,7 @@
 import CMUXMobileCore
 import CmuxMobileShell
 import CmuxMobileSupport
+import CmuxMobileTerminal
 import SwiftUI
 
 /// iMessage-style composer pinned above the terminal.
@@ -12,49 +13,68 @@ import SwiftUI
 /// multi-line message lands as one submission instead of fragmenting on every
 /// interior newline. Toggled from the input accessory bar's composer button; the
 /// chevron dismisses it.
+///
+/// Round 5 hosts the terminal's docked accessory toolbar (modifier / arrow / Ctrl
+/// row) BELOW the compose field: the stack reads terminal / composer field /
+/// toolbar / keyboard, so the toolbar rides the keyboard edge and stays put while
+/// the field grows upward and pushes only the terminal. The toolbar is the same
+/// single surface view, borrowed via ``ComposerToolbarHandoff``.
 struct TerminalComposerView: View {
     @Bindable var store: CMUXMobileShellStore
+    /// The borrowed docked toolbar, published by the surface representable while the
+    /// composer is open. `nil` for a frame between open and the surface publishing.
+    @Bindable var toolbarHandoff: ComposerToolbarHandoff
     @FocusState private var isFieldFocused: Bool
 
     /// Single-line height of the round close/send buttons. They stay pinned to the
     /// bottom edge of the (taller) field via the `HStack`'s `.bottom` alignment.
     private let controlHeight: CGFloat = 40
 
-    /// Line range for the growing compose field. Draft mode is the taller surface,
-    /// so it opens at a 3-line minimum (instead of one) and grows up to 14 lines
-    /// before scrolling, giving a long message real room while the docked toolbar
-    /// stays visible above the keyboard.
-    private let composerLineLimit = 3...14
+    /// Line range for the growing compose field. Round 5 opens it at a SINGLE line
+    /// (`1...`) so it starts as a compact one-line message box and grows as the user
+    /// types, up to 14 lines before scrolling. Each added line pushes the terminal
+    /// up while the toolbar (now docked BELOW the field) stays pinned to the
+    /// keyboard edge.
+    private let composerLineLimit = 1...14
 
-    /// Minimum height of the compose field, sized so the field is visibly taller
-    /// than the round buttons from the moment the composer opens (≈ three lines of
-    /// the callout font plus its vertical padding). It still grows with content up
-    /// to ``composerLineLimit``.
-    private let composerFieldMinHeight: CGFloat = 96
+    /// Minimum height of the compose field. Round 5 drops it to one control height
+    /// so the composer opens at a single line (matching ``composerLineLimit``'s new
+    /// `1...` lower bound) instead of a forced multi-line box. It still grows with
+    /// content up to ``composerLineLimit``.
+    private let composerFieldMinHeight: CGFloat = 40
 
     private var trimmedIsEmpty: Bool {
         store.terminalInputText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
-        composerSurface
-            .onAppear {
-                recordComposerEvent(.composerViewAppear)
-                focusField()
+        VStack(spacing: 0) {
+            composerSurface
+            // The docked toolbar rides the bottom edge below the field (round 5
+            // order). It is full-bleed, so it breaks the composer's horizontal
+            // padding and sits flush to the screen edges like the in-surface dock.
+            if let toolbar = toolbarHandoff.toolbarView {
+                ComposerDockedToolbarHost(toolbarView: toolbar)
+                    .frame(height: GhosttySurfaceView.dockedToolbarHeight)
             }
-            .onDisappear {
-                // COMPOSER: logged independently of `isComposerPresented`. A
-                // disappear with no matching `composerPresentedChanged a==0` is a
-                // view-recreation bug (the flag stayed true but SwiftUI rebuilt the
-                // view), not an intentional dismiss.
-                recordComposerEvent(.composerViewDisappear)
-            }
-            .onChange(of: isFieldFocused) { _, focused in
-                // COMPOSER: a focus-lost while the flag stayed presented and the
-                // view stayed mounted, yet the field reads empty, isolates the
-                // residual TextField/@FocusState render-blank case.
-                recordComposerEvent(.composerFieldFocusChanged, a: focused ? 1 : 0)
-            }
+        }
+        .onAppear {
+            recordComposerEvent(.composerViewAppear)
+            focusField()
+        }
+        .onDisappear {
+            // COMPOSER: logged independently of `isComposerPresented`. A
+            // disappear with no matching `composerPresentedChanged a==0` is a
+            // view-recreation bug (the flag stayed true but SwiftUI rebuilt the
+            // view), not an intentional dismiss.
+            recordComposerEvent(.composerViewDisappear)
+        }
+        .onChange(of: isFieldFocused) { _, focused in
+            // COMPOSER: a focus-lost while the flag stayed presented and the
+            // view stayed mounted, yet the field reads empty, isolates the
+            // residual TextField/@FocusState render-blank case.
+            recordComposerEvent(.composerFieldFocusChanged, a: focused ? 1 : 0)
+        }
     }
 
     /// Record a composer diagnostic event into the store's structured log (DEBUG

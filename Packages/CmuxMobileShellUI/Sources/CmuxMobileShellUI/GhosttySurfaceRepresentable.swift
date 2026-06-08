@@ -22,13 +22,19 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
     /// software keyboard.
     var autoFocusOnWindowAttach: Bool = true
     /// Whether the SwiftUI composer is open. Forwarded to
-    /// `GhosttySurfaceView.setComposerActive`, which keeps the docked accessory bar
-    /// visible above the composer and pulls first responder back to the terminal
-    /// input when the composer closes so the keyboard stays up across the toggle.
+    /// `GhosttySurfaceView.setComposerActive`, which relinquishes the docked
+    /// accessory toolbar to the composer while open and pulls first responder back to
+    /// the terminal input when the composer closes so the keyboard stays up across
+    /// the toggle.
     var isComposerActive: Bool = false
+    /// Cross-layer handle the composer reads to host the docked toolbar below its
+    /// field (round 5 order: terminal / composer / toolbar / keyboard). This
+    /// representable publishes the surface's `dockedToolbarView` into it while the
+    /// composer is active and clears it when the composer closes.
+    var toolbarHandoff: ComposerToolbarHandoff
 
     func makeCoordinator() -> Coordinator {
-        Coordinator(surfaceID: surfaceID, store: store)
+        Coordinator(surfaceID: surfaceID, store: store, toolbarHandoff: toolbarHandoff)
     }
 
     func makeUIView(context: Context) -> UIView {
@@ -55,6 +61,11 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
         // "Send to agent" feedback pane exports. `nil` until P1's log is wired.
         view.diagnosticLog = store.diagnosticLog
         #endif
+        // Publish the docked toolbar to the handoff at creation — before any
+        // composer sibling is mounted to read it — so the cross-layer reference is
+        // set without a "modifying state during view update" invalidation. The
+        // composer reads it (round 5 stacking order) only once it opens.
+        toolbarHandoff.toolbarView = view.dockedToolbarView
         context.coordinator.attach(surfaceView: view)
         return view
     }
@@ -62,7 +73,11 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
     func updateUIView(_ uiView: UIView, context: Context) {
         // Bytes flow via the byte sink; the prop-driven mutations are the
         // autofocus suppression and the composer's claim on the bottom edge +
-        // keyboard.
+        // keyboard. `setComposerActive` checks the toolbar out of the surface (when
+        // opening) or re-adopts it (when closing); the toolbar reference itself was
+        // already published at `makeUIView`, so the composer (which only mounts the
+        // toolbar host while open) finds it ready. This is a UIKit-internal mutation,
+        // not a sibling-observed state write, so it is safe in `updateUIView`.
         guard let surfaceView = uiView as? GhosttySurfaceView else { return }
         surfaceView.autoFocusOnWindowAttach = autoFocusOnWindowAttach
         surfaceView.setComposerActive(isComposerActive)
@@ -70,6 +85,10 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
 
     static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
         (uiView as? GhosttySurfaceView)?.prepareForDismantle()
+        // The surface is gone, so drop the published toolbar reference. Safe here:
+        // dismantle runs when the representable leaves the tree, not during a sibling
+        // view update.
+        coordinator.toolbarHandoff?.toolbarView = nil
         coordinator.detach()
     }
 
@@ -77,11 +96,13 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
         let surfaceID: String
         weak var store: CMUXMobileShellStore?
         weak var surfaceView: GhosttySurfaceView?
+        weak var toolbarHandoff: ComposerToolbarHandoff?
         private var outputTask: Task<Void, Never>?
 
-        init(surfaceID: String, store: CMUXMobileShellStore) {
+        init(surfaceID: String, store: CMUXMobileShellStore, toolbarHandoff: ComposerToolbarHandoff) {
             self.surfaceID = surfaceID
             self.store = store
+            self.toolbarHandoff = toolbarHandoff
             super.init()
         }
 
@@ -207,6 +228,15 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
             // the iMessage-style composer.
             Task { @MainActor [weak store] in
                 store?.toggleComposer()
+            }
+        }
+
+        func ghosttySurfaceViewDidRequestComposerDismiss(_ surfaceView: GhosttySurfaceView) {
+            // The keyboard-dismiss button was tapped while the composer was open.
+            // Close the composer outright (round 5 edge-case fix) so it can never be
+            // left presented with the keyboard down.
+            Task { @MainActor [weak store] in
+                store?.dismissComposer()
             }
         }
 

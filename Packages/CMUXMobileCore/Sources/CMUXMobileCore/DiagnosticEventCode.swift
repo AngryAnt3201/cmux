@@ -126,4 +126,25 @@ public enum DiagnosticEventCode: UInt16, Sendable, Codable, CaseIterable {
     /// stayed mounted, yet the field reads empty, isolates the residual
     /// `TextField`/`@FocusState` render-blank case.
     case composerFieldFocusChanged = 22
+
+    // COMPOSER round-5 keyboard-toggle edge case (composer shown while the
+    // textbox/keyboard is hidden). These pin which transition desyncs the
+    // composer-presented flag from the keyboard/first-responder state, and they
+    // land in the same `store.diagnosticLog` sink the round-4 composer events use.
+
+    /// `GhosttySurfaceView.setComposerActive` ran. `a` = 1 if the composer just
+    /// became active, else 0. `b` = the resolved first-responder owner
+    /// (``responderIdentity`` raw value: which view holds first responder at the
+    /// transition). `c` = 1 if the terminal input proxy is first responder, else 0.
+    /// `ms` = the surface's `keyboardHeight` (points) at the transition. A trace
+    /// where `a == 1` but `ms == 0` and no terminal/composer responder owns FR is
+    /// the composer-up/keyboard-down desync.
+    case composerActiveTransition = 23
+
+    /// The docked bar's keyboard toggle button was tapped while the composer is
+    /// presented. `a` = 1 if the terminal input proxy was first responder when
+    /// tapped (so the tap would hide the keyboard), else 0. Records the exact tap
+    /// that can strand the composer with the keyboard down, so round 5's "dismiss
+    /// the composer too" handling can be confirmed (or the residual case named).
+    case composerKeyboardToggleWhilePresented = 24
 }
