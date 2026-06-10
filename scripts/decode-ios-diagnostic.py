@@ -55,6 +55,7 @@ EVENT_CODES = {
     25: ("renderFrameApplied", "ms=gapSincePrev a=chunkBytes (RENDER)"),
     26: ("renderBusySkipped", "a=inFlightMs (RENDER)"),
     27: ("renderCompleted", "ms=renderMs (RENDER)"),
+    28: ("pairUnreachable", ""),
 }
 
 # InputResponderIdentity raw value -> name.
