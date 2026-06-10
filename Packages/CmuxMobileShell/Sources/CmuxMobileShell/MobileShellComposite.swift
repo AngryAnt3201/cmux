@@ -307,6 +307,13 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     /// Clock driving the scrolled-up stability window. Injected so tests flip
     /// the hysteresis with virtual time instead of real waiting.
     @ObservationIgnored private let scrolledUpSignalClock: any Clock<Duration>
+    /// Pending settle task per surface: the deferred flip of
+    /// ``terminalScrolledUpBySurfaceID`` to the raw signal's new value once it
+    /// has held for ``scrolledUpStabilityWindow``. At most one per surface, and
+    /// it always targets the opposite of the displayed value (a raw frame that
+    /// matches the displayed value cancels it instead). Not observed:
+    /// bookkeeping, not view state.
+    @ObservationIgnored private var scrolledUpSettleTaskBySurfaceID: [String: Task<Void, Never>] = [:]
     /// Guards ``submitComposerInput()`` against re-entrancy. A quick double tap
     /// on Send would otherwise start two sends that both capture the same text
     /// (the field is cleared only on ack), pasting the message to the agent
@@ -620,6 +627,9 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     }
 
     isolated deinit {
+        for task in scrolledUpSettleTaskBySurfaceID.values {
+            task.cancel()
+        }
         networkPathObservationTask?.cancel()
         terminalEventListenerTask?.cancel()
         renderGridLivenessTimer?.cancel()
@@ -756,16 +766,59 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     }
 
     /// Ingest the raw per-frame scrolled-up signal for a surface from a
-    /// processed render-grid frame. Idempotent: an unchanged value does not
-    /// touch the observable dictionary, so a steady stream of at-bottom frames
-    /// does not invalidate the SwiftUI views observing it.
+    /// processed render-grid frame, applying time hysteresis before it reaches
+    /// the displayed ``terminalScrolledUpBySurfaceID``.
+    ///
+    /// The raw signal is the Mac's per-frame `atBottom` hint, which blips near
+    /// the at-bottom boundary (drags, streaming output); mirroring it directly
+    /// made the floating button flicker. The displayed value flips only after
+    /// the raw signal has held the opposite value for
+    /// ``scrolledUpStabilityWindow``: a frame that disagrees with the displayed
+    /// value starts (at most one) settle task, and a frame that agrees with the
+    /// displayed value cancels it, so a blip shorter than the window never
+    /// reaches the UI in either direction. Steady agreeing frames are no-ops
+    /// and do not invalidate the SwiftUI views observing the dictionary.
     func ingestTerminalScrolledUpSignal(surfaceID: String, scrolledUp: Bool) {
-        guard terminalScrolledUpBySurfaceID[surfaceID] != scrolledUp else { return }
+        let displayed = terminalScrolledUpBySurfaceID[surfaceID] ?? false
+        guard scrolledUp != displayed else {
+            // The raw signal returned to the displayed value before the window
+            // elapsed: revoke the pending flip — the blip never shows.
+            scrolledUpSettleTaskBySurfaceID.removeValue(forKey: surfaceID)?.cancel()
+            return
+        }
+        // Already settling toward this value (the only possible target is
+        // `!displayed`); let the original window keep counting.
+        guard scrolledUpSettleTaskBySurfaceID[surfaceID] == nil else { return }
+        let clock = scrolledUpSignalClock
+        scrolledUpSettleTaskBySurfaceID[surfaceID] = Task { [weak self] in
+            // Bounded, cancellable stability window (the hysteresis itself),
+            // driven by the injected clock; a counter-signal cancels it via the
+            // stored task, and `isCancelled` re-checks after the actor hop so a
+            // revocation that raced the wakeup still wins.
+            guard (try? await clock.sleep(for: Self.scrolledUpStabilityWindow)) != nil,
+                  !Task.isCancelled else { return }
+            self?.applySettledScrolledUp(surfaceID: surfaceID, scrolledUp: scrolledUp)
+        }
+    }
+
+    /// Apply a settle task's flip once its stability window elapsed
+    /// uncancelled. Clears the task slot first so a follow-up counter-signal
+    /// starts a fresh window. Only ever called by the surface's own pending
+    /// task (uncancelled tasks are never replaced), so the slot is its own.
+    private func applySettledScrolledUp(surfaceID: String, scrolledUp: Bool) {
+        scrolledUpSettleTaskBySurfaceID[surfaceID] = nil
         terminalScrolledUpBySurfaceID[surfaceID] = scrolledUp
     }
 
-    /// Wait until every pending scrolled-up settle has resolved. Test seam.
-    func drainScrolledUpSettleForTesting() async {}
+    /// Wait until every pending scrolled-up settle has resolved (applied or
+    /// been cancelled). Test seam: lets tests assert the displayed state
+    /// without sleeping. Snapshots the tasks first; awaiting a sleeping task
+    /// requires the test to advance its manual clock beforehand.
+    func drainScrolledUpSettleForTesting() async {
+        for task in scrolledUpSettleTaskBySurfaceID.values {
+            await task.value
+        }
+    }
 
     /// Jump the Mac's real surface for `surfaceID` to the live bottom (out of
     /// scrollback). The phone's display-only mirror has no local scrollback, so
@@ -773,6 +826,14 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     /// emits a render frame reporting at-bottom, hiding the button. Mirrors
     /// ``scrollTerminal(surfaceID:lines:col:row:)``. Fire-and-forget.
     public func scrollTerminalToBottom(surfaceID: String) async {
+        // The tap's intent is "go to the bottom now": hide the affordance
+        // immediately (revoking any pending settle) instead of waiting a render
+        // round-trip plus stability window. If the jump fails, the next frames
+        // still report scrolled-up and the button returns through the window.
+        scrolledUpSettleTaskBySurfaceID.removeValue(forKey: surfaceID)?.cancel()
+        if terminalScrolledUpBySurfaceID[surfaceID] == true {
+            terminalScrolledUpBySurfaceID[surfaceID] = false
+        }
         guard let client = remoteClient,
               let workspaceID = workspaceID(forTerminalID: surfaceID) else {
             return
