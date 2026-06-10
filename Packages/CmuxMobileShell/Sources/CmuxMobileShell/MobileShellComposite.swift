@@ -3482,7 +3482,7 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             }
             guard !disconnectForAuthorizationFailureIfNeeded(error) else { return }
             markMacConnectionUnavailableIfNeeded(after: error)
-            connectionError = Self.localizedConnectionError(for: error)
+            applyOperationalError(error)
         }
     }
 
@@ -3591,7 +3591,7 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             guard generation == connectionGeneration else { return false }
             guard !disconnectForAuthorizationFailureIfNeeded(error) else { return false }
             markMacConnectionUnavailableIfNeeded(after: error)
-            connectionError = Self.localizedConnectionError(for: error)
+            applyOperationalError(error)
             return false
         }
     }
