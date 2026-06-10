@@ -195,6 +195,7 @@ extension TerminalController {
             ]
         }
 
+        let preview = mobileWorkspacePreview(workspace: workspace)
         return [
             "id": workspace.id.uuidString,
             "title": workspace.title,
@@ -204,8 +205,106 @@ extension TerminalController {
             // Group membership so the phone can fold contiguous same-group
             // workspaces under their group header. nil for ungrouped workspaces.
             "group_id": v2OrNull(workspace.groupId?.uuidString),
+            // iMessage-style last-activity preview: a one-line, plain-text summary
+            // of the most recent notification (agent/terminal activity), with its
+            // timestamp, so the phone can show a preview + relative time per row.
+            // nil when the workspace has no activity yet.
+            "preview": v2OrNull(preview?.text),
+            "preview_at": v2OrNull(preview?.epochSeconds),
             "terminals": terminals
         ]
+    }
+
+    /// The most recent activity line shown under a workspace row on the phone.
+    ///
+    /// Sourced from the same `latestNotification(forTabId:)` the Mac sidebar uses
+    /// for its subtitle (body, falling back to title), so the phone mirrors the
+    /// desktop. The text is flattened to a single line, has control/ANSI bytes
+    /// stripped, collapses runs of whitespace, and is length-capped so a noisy
+    /// notification can never bloat the list payload or wrap the row. `nil` when
+    /// the workspace has no notification yet (the row then shows no preview).
+    private func mobileWorkspacePreview(workspace: Workspace) -> (text: String, epochSeconds: Double)? {
+        guard let notification = AppDelegate.shared?.notificationStore?
+            .latestNotification(forTabId: workspace.id) else {
+            return nil
+        }
+        let raw = notification.body.isEmpty ? notification.title : notification.body
+        guard let text = Self.mobilePreviewSanitize(raw) else { return nil }
+        return (text, notification.createdAt.timeIntervalSince1970)
+    }
+
+    /// Maximum characters in a mobile workspace preview line. Long enough for a
+    /// useful summary, short enough that the row never wraps and the payload stays
+    /// small for big workspace lists.
+    nonisolated static let mobilePreviewMaxLength = 140
+
+    /// How much raw notification text the sanitizer is willing to process,
+    /// measured in unicode scalars. Notification bodies come from terminal output
+    /// and are not length-capped at ingestion, and sanitizing runs on the main
+    /// actor for every workspace on every mobile list refresh, so the work must
+    /// be bounded before the regex and scalar passes, not after. The bound is in
+    /// scalars rather than `Character`s because a single crafted grapheme cluster
+    /// can carry an arbitrarily long run of combining scalars; a
+    /// Character-counted cap would still scan and emit the whole cluster. A 16x
+    /// multiple of the visible cap is plenty to fill the preview even when
+    /// escapes and whitespace inflate the raw text; pathological input that is
+    /// escapes-only past this bound just yields a shorter (or no) preview.
+    nonisolated static let mobilePreviewInputCap = mobilePreviewMaxLength * 16
+
+    /// Flattens arbitrary notification text into a single plain-text preview line:
+    /// strips ANSI escape sequences and other control characters, collapses
+    /// whitespace runs (including newlines) to single spaces, trims, and caps the
+    /// length with an ellipsis. Returns `nil` for empty/whitespace-only input.
+    /// Input beyond ``mobilePreviewInputCap`` is never scanned; a truncated input
+    /// always renders a trailing ellipsis so the row signals there was more.
+    nonisolated static func mobilePreviewSanitize(_ raw: String) -> String? {
+        // Bound the work first, walking the scalar view: each step advances one
+        // scalar, so `index(_:offsetBy:limitedBy:)` costs at most the cap, never
+        // the full body, and a multi-megabyte notification (or one grapheme
+        // cluster hiding millions of combining scalars) costs the same as a
+        // small one. Scalar-view indices are valid String slice bounds; cutting
+        // mid-cluster at worst leaves a degenerate cluster the later passes
+        // treat like any other text.
+        let scalarView = raw.unicodeScalars
+        let bounded: Substring
+        let inputWasTruncated: Bool
+        if let cutoff = scalarView.index(
+            scalarView.startIndex,
+            offsetBy: mobilePreviewInputCap,
+            limitedBy: scalarView.endIndex
+        ), cutoff < scalarView.endIndex {
+            bounded = raw[..<cutoff]
+            inputWasTruncated = true
+        } else {
+            bounded = raw[...]
+            inputWasTruncated = false
+        }
+        // Drop ANSI/OSC escape sequences first so their payload bytes don't leak
+        // into the preview as stray characters once the ESC is removed. Each
+        // alternation also matches an unterminated sequence at end-of-input (the
+        // CSI final byte is optional, OSC accepts `$` as terminator) so a
+        // sequence cut by the input cap is stripped instead of leaking payload.
+        let withoutEscapes = bounded.replacingOccurrences(
+            of: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]?|\u{001B}\\][^\u{0007}\u{001B}]*(?:\u{0007}|\u{001B}\\\\|$)|\u{001B}[@-Z\\\\-_]",
+            with: "",
+            options: .regularExpression
+        )
+        // Replace any remaining control character (including newlines/tabs) and
+        // collapse whitespace runs into single spaces.
+        let scalars = withoutEscapes.unicodeScalars.map { scalar -> Character in
+            (CharacterSet.controlCharacters.contains(scalar) || CharacterSet.whitespacesAndNewlines.contains(scalar))
+                ? " "
+                : Character(scalar)
+        }
+        let collapsed = String(scalars)
+            .split(separator: " ", omittingEmptySubsequences: true)
+            .joined(separator: " ")
+        let trimmed = collapsed.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        if trimmed.count <= mobilePreviewMaxLength, !inputWasTruncated {
+            return trimmed
+        }
+        return String(trimmed.prefix(mobilePreviewMaxLength - 1)) + "\u{2026}"
     }
 
     /// Serializes the window's workspace groups into the iOS-facing mobile shape.
