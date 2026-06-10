@@ -3402,15 +3402,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
         isLoadingDraft = false
     }
 
-    /// Drop the persisted draft for the currently selected terminal (e.g. after
-    /// its composed text was successfully sent). The in-memory field is cleared by
-    /// the submit paths; this only removes the durable copy so it cannot resurrect
-    /// on relaunch.
-    private func clearCurrentPersistedDraft() {
-        guard let draftStore, let terminalID = selectedTerminalID?.rawValue else { return }
-        Task { await draftStore.clearDraft(forTerminalID: terminalID) }
-    }
-
     private func viewportKey(
         workspaceID: MobileWorkspacePreview.ID,
         terminalID: MobileTerminalPreview.ID
