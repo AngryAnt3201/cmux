@@ -44,6 +44,9 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
             fontSize: fontSize
         )
         view.autoFocusOnWindowAttach = autoFocusOnWindowAttach
+        // Stamp the shell-level id so id-scoped registry lookups (the
+        // "View as Text" capture) resolve this exact terminal.
+        view.hostSurfaceID = surfaceID
         context.coordinator.attach(surfaceView: view)
         return view
     }

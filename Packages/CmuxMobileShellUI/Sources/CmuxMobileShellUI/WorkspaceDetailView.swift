@@ -159,7 +159,7 @@ struct WorkspaceDetailView: View {
             feedbackComposer
         }
         .sheet(isPresented: $isTextSheetPresented) {
-            TerminalTextSheetView()
+            TerminalTextSheetView(surfaceID: selectedTerminal?.id.rawValue)
         }
         #endif
     }
