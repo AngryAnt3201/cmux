@@ -62,12 +62,18 @@ final class PhonePushClient {
     /// - Parameter badgeCount: The authoritative unread-notification total at
     ///   send time; the server emits it as `aps.badge` so the phone's icon badge
     ///   is always SET to the computed total (never incremented locally).
-    func forward(_ notification: TerminalNotification, badgeCount: Int) {
-        guard Self.isForwardingEnabled else { return }
+    /// - Returns: Whether the banner push was actually queued for sending —
+    ///   `false` when forwarding is off or the per-tab/surface throttle dropped
+    ///   it. The store keys the superseded-banner dismiss on this, so a
+    ///   throttled replacement can never strand the phone with no banner for a
+    ///   still-unread notification.
+    @discardableResult
+    func forward(_ notification: TerminalNotification, badgeCount: Int) -> Bool {
+        guard Self.isForwardingEnabled else { return false }
 
         let key = "\(notification.tabId.uuidString):\(notification.surfaceId?.uuidString ?? "")"
         let now = Date()
-        if let last = lastSentAt[key], now.timeIntervalSince(last) < Self.minInterval { return }
+        if let last = lastSentAt[key], now.timeIntervalSince(last) < Self.minInterval { return false }
         lastSentAt[key] = now
 
         let hideContent = UserDefaults.standard.bool(forKey: PhonePushSettings.hideContentKey)
@@ -84,6 +90,7 @@ final class PhonePushClient {
             hideContent: hideContent
         )
         Task { await send(payload) }
+        return true
     }
 
     /// The cold lane of Mac→iOS dismiss-sync: mirror a Mac-side dismiss through
