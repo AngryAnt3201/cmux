@@ -5,7 +5,7 @@
 22576	Sources/TerminalController.swift
 19955	Sources/Workspace.swift
 19248	Sources/ContentView.swift
-18057	Sources/AppDelegate.swift
+18021	Sources/AppDelegate.swift
 16539	Sources/GhosttyTerminalView.swift
 13608	Sources/Panels/BrowserPanel.swift
 11916	cmuxTests/AppDelegateShortcutRoutingTests.swift
@@ -29,7 +29,7 @@
 3937	Sources/Feed/FeedPanelView.swift
 3760	cmuxTests/TabManagerUnitTests.swift
 3699	cmuxTests/CLIGenericHookPersistenceTests.swift
-3694	Packages/CmuxMobileTerminal/Sources/CmuxMobileTerminal/GhosttySurfaceView.swift
+3665	Packages/CmuxMobileTerminal/Sources/CmuxMobileTerminal/GhosttySurfaceView.swift
 3396	Sources/CmuxConfig.swift
 3316	cmuxTests/TabManagerSessionSnapshotTests.swift
 3202	Sources/Update/UpdateTitlebarAccessory.swift
@@ -167,17 +167,18 @@
 539	CLI/CodexTeamsApprovalBridge.swift
 538	CLI/CMUXCLI+Themes.swift
 536	cmuxTests/CmuxConfigContextMenuTests.swift
+530	Packages/CmuxMobileTerminal/Sources/CmuxMobileTerminal/GhosttyRuntime.swift
 528	cmuxTests/CLINotifyProcessTestSupport.swift
 528	cmuxUITests/AutomationSocketUITests.swift
 527	CLI/CLISocketPathResolver.swift
 523	Packages/CmuxSettingsUI/Sources/CmuxSettingsUI/Scene/SettingsWindowScene.swift
-522	Packages/CmuxMobileTerminal/Sources/CmuxMobileTerminal/GhosttyRuntime.swift
 520	CLI/CMUXCLI+AmpExtension.swift
 520	cmuxTests/MainWindowVisibilityControllerTests.swift
 519	Packages/CmuxSwiftRender/Tests/CmuxSwiftRenderTests/Corpus/stress-two-column-cockpit-sidebar.swift
 518	Packages/CmuxSwiftRender/Tests/CmuxSwiftRenderTests/Corpus/stress-git-review-queue-command-deck.swift
 516	Sources/CmuxConfigExecutor.swift
 514	cmuxUITests/UpdatePillUITests.swift
+512	Packages/CmuxMobileShellUI/Sources/CmuxMobileShellUI/WorkspaceDetailView.swift
 509	Packages/CMUXAgentLaunch/Sources/CMUXAgentLaunch/AgentLaunchSanitizerAdditionalPolicies.swift
 507	Sources/TerminalControllerTopSupport.swift
 506	Sources/App/MainWindowVisibilityController.swift
