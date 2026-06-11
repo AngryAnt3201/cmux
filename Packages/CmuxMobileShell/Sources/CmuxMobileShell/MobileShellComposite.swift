@@ -229,6 +229,14 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     /// (dictation, autocorrect, keyboard/clipboard paste) fall back to per-key
     /// `terminal.input` instead of being dropped with `method_not_found`.
     public private(set) var supportsTerminalPaste: Bool = false
+    #if DEBUG
+    /// Whether the connected Mac advertises the `dogfood.checklist` capability
+    /// (the P2 checklist push/fetch verbs). Parsed from the same
+    /// `mobile.host.status` resolve as the other capability flags so the DEV
+    /// checklist subscription never needs its own status round-trip (the
+    /// render-grid liveness watchdog's regression tests count those).
+    private var supportsDogfoodChecklist = false
+    #endif
     /// Whether the connected Mac advertises the `dogfood.v1` capability (the
     /// `dogfood.feedback.submit` agent sink). `false` until host status is read,
     /// and for older Macs that lack the handler, so the privileged Send Feedback
@@ -1226,9 +1234,9 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             defer { self?.dogfoodChecklistListenerTask = nil }
             guard let self else { return }
             // Gate on the Mac advertising the capability so a P1-only Mac is a
-            // no-op (no subscribe, no fetch). The capability check reuses the
-            // host status the terminal path already resolves.
-            guard await self.macAdvertisesDogfoodChecklist(client: client) else { return }
+            // no-op (no subscribe, no fetch). The flag is parsed from the host
+            // status the terminal path already resolved; no extra status RPC.
+            guard self.supportsDogfoodChecklist else { return }
             let stream = await client.subscribe(to: topics)
             let subscribed = await self.requestDogfoodChecklistSubscription(client: client)
             guard subscribed else { return }
@@ -1247,20 +1255,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     private func stopDogfoodChecklistSubscription() {
         dogfoodChecklistListenerTask?.cancel()
         dogfoodChecklistListenerTask = nil
-    }
-
-    /// Whether the connected Mac advertises the dogfood-checklist capability.
-    private func macAdvertisesDogfoodChecklist(client: MobileCoreRPCClient) async -> Bool {
-        do {
-            let data = try await client.sendRequest(
-                MobileCoreRPCClient.requestData(method: "mobile.host.status", params: [:]),
-                timeoutNanoseconds: Self.terminalOutputCapabilityTimeoutNanoseconds
-            )
-            guard let payload = try? MobileHostStatusResponse.decode(data) else { return false }
-            return payload.capabilities.contains(Self.dogfoodChecklistCapability)
-        } catch {
-            return false
-        }
     }
 
     /// Register the dedicated checklist subscription with the Mac host. Uses a
@@ -1338,6 +1332,7 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
         // no checklist set: clear the pane.
         return .cleared
     }
+    #endif
 
     // MARK: - Feedback routing
 
@@ -1375,133 +1370,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     /// active connection, everyone else routes to the email inbox.
     public var currentFeedbackRoute: MobileFeedbackRoute {
         MobileFeedbackRoute.resolve(
-            email: signedInUserEmail,
-            hasActiveMacConnection: hasActiveMacConnection,
-            hostSupportsAgentSink: supportsDogfoodFeedback
-        )
-    }
-
-    /// The current build + device stamp, resolved through the injected provider.
-    public var currentFeedbackStamp: MobileFeedbackStamp {
-        feedbackStampProvider()
-    }
-
-    /// Outcome of a Send Feedback submission, including which route was taken so
-    /// the UI can word its confirmation ("sent to the agent" vs "emailed").
-    public enum FeedbackSubmissionOutcome: Equatable, Sendable {
-        /// The rich diagnostic bundle was delivered to the paired Mac.
-        case sentToAgent
-        /// The message was emailed to the feedback inbox.
-        case emailed
-        /// Delivery failed; the UI should surface an error and let the user retry.
-        case failed
-    }
-
-    /// The single Send Feedback entrypoint. Routes the submission to the
-    /// privileged direct-to-agent bundle or the email inbox per
-    /// ``currentFeedbackRoute``, stamping the build + device on both paths.
-    ///
-    /// One mutation path so every surface (the menu affordance, and any future
-    /// entrypoint) shares the same routing, stamping, and delivery rather than
-    /// duplicating it.
-    ///
-    /// - Parameters:
-    ///   - message: The freeform feedback body.
-    ///   - emailOverride: The reply-to email when the user edited it on the email
-    ///     path; defaults to the signed-in email.
-    ///   - debugLogText: The string debug-log snapshot, used only on the agent
-    ///     path.
-    ///   - terminalText: The visible terminal text, used only on the agent path.
-    /// - Returns: The outcome (which route succeeded, or `.failed`).
-    @discardableResult
-    public func submitFeedback(
-        message: String,
-        emailOverride: String? = nil,
-        debugLogText: String,
-        terminalText: String
-    ) async -> FeedbackSubmissionOutcome {
-        let stamp = currentFeedbackStamp
-        switch currentFeedbackRoute {
-        case .privilegedAgent:
-            let ok = await submitPrivilegedAgentFeedback(
-                text: message,
-                debugLogText: debugLogText,
-                terminalText: terminalText,
-                buildStamp: stamp.agentBuildStamp
-            )
-            if ok {
-                return .sentToAgent
-            }
-            // The agent sink failed (e.g. the Mac rejected the privileged sink,
-            // or the RPC could not be delivered). Fall back to the email inbox
-            // rather than dead-ending, so the report is still delivered. Any
-            // valid reply-to works; we have the signed-in email here.
-            mobileShellLog.error("privileged agent feedback failed; falling back to email")
-            return await submitFeedbackEmail(message: message, emailOverride: emailOverride, stamp: stamp)
-        case .email:
-            return await submitFeedbackEmail(message: message, emailOverride: emailOverride, stamp: stamp)
-        }
-    }
-
-    /// Email the feedback inbox, returning `.emailed` on success and `.failed`
-    /// when the submitter is unavailable or the POST fails. Shared by the email
-    /// route and the privileged-agent fallback so both deliver identically.
-    private func submitFeedbackEmail(
-        message: String,
-        emailOverride: String?,
-        stamp: MobileFeedbackStamp
-    ) async -> FeedbackSubmissionOutcome {
-        guard let submitter = feedbackEmailSubmitter else {
-            mobileShellLog.error("feedback email submitter unavailable")
-            return .failed
-        }
-        let email = (emailOverride ?? signedInUserEmail ?? "")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-        do {
-            try await submitter.submit(email: email, message: message, stamp: stamp)
-            return .emailed
-        } catch {
-            mobileShellLog.error("feedback email submit failed error=\(String(describing: error), privacy: .public)")
-            return .failed
-        }
-    }
-
-    // MARK: - Feedback routing
-
-    /// An all-empty stamp used when no app-layer provider is injected (previews /
-    /// tests). A real build always injects a populated provider at the
-    /// composition root.
-    public static let emptyFeedbackStamp = MobileFeedbackStamp(
-        buildType: .prod,
-        appVersion: "",
-        appBuild: "",
-        bundleIdentifier: "",
-        osVersion: "",
-        deviceModel: ""
-    )
-
-    /// The signed-in user's primary email, read through the identity seam.
-    ///
-    /// Used by the Send Feedback affordance to decide the route (privileged vs
-    /// email) and to prefill the reply-to address on the email path.
-    public var signedInUserEmail: String? {
-        identityProvider?.currentUserEmail
-    }
-
-    /// Whether the device currently has an active mobile-host connection to a
-    /// paired Mac — the implementable "on the tailnet" proxy used by feedback
-    /// routing, since that transport runs over Tailscale.
-    public var hasActiveMacConnection: Bool {
-        connectionState == .connected && remoteClient != nil
-    }
-
-    /// Where a Send Feedback submission should be delivered right now.
-    ///
-    /// Pure decision over the current email + connection state; the privileged
-    /// direct-to-agent route is offered only to `@manaflow.ai` users on an
-    /// active connection, everyone else routes to the email inbox.
-    public var currentFeedbackRoute: MobileFeedbackRoute {
-        resolveMobileFeedbackRoute(
             email: signedInUserEmail,
             hasActiveMacConnection: hasActiveMacConnection,
             hostSupportsAgentSink: supportsDogfoodFeedback
@@ -4500,6 +4368,9 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
                 supportsTerminalPaste = false
                 supportsDogfoodFeedback = false
                 supportsWorkspaceGroups = false
+                #if DEBUG
+                supportsDogfoodChecklist = false
+                #endif
                 scheduleHostIdentityAdoptionIfNeeded(client: client)
                 return fallback
             }
@@ -4507,6 +4378,9 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             supportsTerminalPaste = payload.capabilities.contains(Self.terminalPasteCapability)
             supportsDogfoodFeedback = payload.capabilities.contains(Self.dogfoodFeedbackCapability)
             supportsWorkspaceGroups = payload.capabilities.contains(Self.workspaceGroupsCapability)
+            #if DEBUG
+            supportsDogfoodChecklist = payload.capabilities.contains(Self.dogfoodChecklistCapability)
+            #endif
             await applyHostReportedIdentity(
                 client: client,
                 deviceID: payload.macDeviceID,
@@ -4530,6 +4404,9 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             supportsTerminalPaste = false
             supportsDogfoodFeedback = false
             supportsWorkspaceGroups = false
+            #if DEBUG
+            supportsDogfoodChecklist = false
+            #endif
             // The probe is best-effort for the terminal transport, but a
             // freshly QR-paired Mac still needs its identity recovered, with
             // a real timeout instead of the probe's 750ms.
@@ -4558,12 +4435,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     private func startTerminalRefreshPolling() {
         guard let client = remoteClient else { return }
         guard runtime?.supportsServerPushEvents ?? true else { return }
-        #if DEBUG
-        // Arm the dedicated, durable dogfood-checklist subscription alongside the
-        // terminal stream (its own task + stream_id, so the render-grid liveness
-        // watchdog's re-subscribe never drops it). Idempotent.
-        startDogfoodChecklistSubscription()
-        #endif
         guard terminalEventListenerTask == nil else { return }
         let listenerID = UUID()
         terminalEventListenerID = listenerID
@@ -4589,6 +4460,13 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             }
 
             let outputTransport = await self?.resolveTerminalOutputTransport(client: client) ?? .rawBytes
+            #if DEBUG
+            // Arm the dedicated, durable dogfood-checklist subscription once the
+            // capability flags above are resolved (its own task + stream_id, so
+            // the render-grid liveness watchdog's re-subscribe never drops it,
+            // and no extra `mobile.host.status` round-trip). Idempotent.
+            self?.startDogfoodChecklistSubscription()
+            #endif
             let topics = outputTransport.eventTopics
             let stream = await client.subscribe(to: Set(topics))
             // Kick off the server-side enable handshake CONCURRENTLY with
