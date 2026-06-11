@@ -71,6 +71,9 @@ struct GhosttySurfaceRepresentable: UIViewRepresentable {
         // `nil` when no log is wired; every probe is then a no-op.
         view.diagnosticLog = store.diagnosticLog
         #endif
+        // Stamp the shell-level id so id-scoped registry lookups (the
+        // "View as Text" capture) resolve this exact terminal.
+        view.hostSurfaceID = surfaceID
         context.coordinator.attach(surfaceView: view)
         // Seed the floating jump-to-bottom button from the store's authoritative
         // scrolled-up state for this surface.
