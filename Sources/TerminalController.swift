@@ -21573,6 +21573,8 @@ class TerminalController {
             result = v2MobileWorkspaceGroupSetCollapsed(params: request.params, isCollapsed: true)
         case "workspace.group.expand":
             result = v2MobileWorkspaceGroupSetCollapsed(params: request.params, isCollapsed: false)
+        case "notification.reconcile":
+            result = v2MobileNotificationReconcile(params: request.params)
         case "dogfood.feedback.submit":
             result = await v2MobileDogfoodFeedbackSubmit(params: request.params)
 #if DEBUG
@@ -21960,19 +21962,29 @@ class TerminalController {
     /// for the already-removed phone banner. Carries only opaque UUIDs, never
     /// terminal content.
     private func v2MobileNotificationDismiss(params: [String: Any]) -> V2CallResult {
+        // Cap the scan like `notification.reconcile`: a phone cannot meaningfully
+        // dismiss more than this in one request (its durable outbox holds 128),
+        // so anything past the cap is a malformed or hostile frame and is
+        // ignored instead of trimmed/parsed on the main actor.
+        let maxDismissIDs = 256
         var rawIDs: [String] = []
         if let single = v2OptionalTrimmedRawString(params, "notification_id") {
             rawIDs.append(single)
         }
         if let array = params["notification_ids"] as? [Any] {
-            for value in array {
+            for value in array.prefix(maxDismissIDs) {
                 if let string = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
                    !string.isEmpty {
                     rawIDs.append(string)
                 }
             }
         }
-        let ids = rawIDs.compactMap { UUID(uuidString: $0) }
+        // Dedupe (preserving order) so a repeated id cannot double-count in
+        // `dismissed` or run the markRead path twice.
+        var seenIDs = Set<UUID>()
+        let ids = rawIDs
+            .compactMap { UUID(uuidString: $0) }
+            .filter { seenIDs.insert($0).inserted }
         guard !ids.isEmpty else {
             return .err(
                 code: "invalid_params",
@@ -21991,6 +22003,33 @@ class TerminalController {
             dismissed += 1
         }
         return .ok(["dismissed": dismissed])
+    }
+
+    /// Foreground reconcile sweep for the phone (lane 3 of dismiss-sync): given
+    /// the banner ids currently delivered on the phone, report which were handled
+    /// on this Mac — read in the store, or recently dismissed/removed
+    /// (tombstoned) — plus the authoritative unread count, so the phone clears
+    /// stale banners and SETS its icon badge to the computed total. Ids unknown
+    /// to this Mac are not reported handled (they may belong to a different
+    /// paired Mac). An empty `delivered_ids` is a valid badge-only sync.
+    /// Exchanges only opaque UUIDs and a count, never terminal content.
+    private func v2MobileNotificationReconcile(params: [String: Any]) -> V2CallResult {
+        // Cap the scan: iOS keeps only the most recent delivered notifications,
+        // so anything past this is a malformed or hostile request.
+        let maxDeliveredIDs = 256
+        let rawIDs = ((params["delivered_ids"] as? [Any]) ?? []).prefix(maxDeliveredIDs)
+        let deliveredIDs = rawIDs.compactMap { value -> UUID? in
+            guard let string = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !string.isEmpty else {
+                return nil
+            }
+            return UUID(uuidString: string)
+        }
+        let store = TerminalNotificationStore.shared
+        return .ok([
+            "handled_ids": store.reconcileHandledNotificationIDs(deliveredIDs: deliveredIDs),
+            "unread_count": store.unreadNotificationCount,
+        ])
     }
 
     /// The `workspace.action` sub-actions the mobile data plane may invoke.
