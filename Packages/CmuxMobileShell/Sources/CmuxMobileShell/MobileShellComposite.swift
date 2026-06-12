@@ -572,13 +572,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     /// Tail of the serialized paired-Mac store write chain; see
     /// ``performSerializedPairedMacWrite(ifStillCurrent:_:)``.
     private var pairedMacWriteChain: Task<Void, Never>?
-    /// The in-flight `mobile.events.subscribe` (reason `start`) ack for the
-    /// current listener generation. It runs concurrently with the consumer
-    /// loop (the ack is a server-side enable handshake, not a delivery
-    /// precondition: a prior generation's server subscription keeps pushing
-    /// across re-subscribes) so events arriving during the round-trip are
-    /// consumed, not buffered invisibly behind the await.
-    private var terminalSubscriptionStartTask: Task<Void, Never>?
     // Liveness watchdog for the render-grid push subscription. The `for await`
     // listener loop blocks indefinitely if the underlying connection half-dies
     // (network blip, Mac stops pushing, background/foreground cycle): the
@@ -1023,60 +1016,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     }
 
     // MARK: - Workspace actions
-
-    /// Rename a workspace on the Mac.
-    ///
-    /// Fire-and-forget against the authoritative state: the Mac applies the title
-    /// and its workspace-list observer pushes `workspace.updated`, which refreshes
-    /// this list. No local optimistic mutation, so overlapping actions can never
-    /// leave stale state.
-    /// - Parameters:
-    ///   - id: The workspace to rename.
-    ///   - title: The new title. Whitespace-only titles are ignored.
-    public func renameWorkspace(id: MobileWorkspacePreview.ID, title: String) async {
-        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let client = remoteClient else { return }
-        do {
-            let request = try MobileCoreRPCClient.requestData(
-                method: "workspace.action",
-                params: [
-                    "workspace_id": id.rawValue,
-                    "action": "rename",
-                    "title": trimmed,
-                    "client_id": clientID,
-                ]
-            )
-            _ = try await client.sendRequest(request)
-        } catch {
-            mobileShellLog.error("workspace rename failed id=\(id.rawValue, privacy: .public) error=\(String(describing: error), privacy: .public)")
-        }
-    }
-
-    /// Pin or unpin a workspace on the Mac.
-    ///
-    /// Fire-and-forget against the authoritative state: the Mac toggles the pin
-    /// and its workspace-list observer (which watches `$isPinned`) pushes
-    /// `workspace.updated`, which refreshes this list. No local optimistic
-    /// mutation, so overlapping pin/unpin taps can never leave stale state.
-    /// - Parameters:
-    ///   - id: The workspace to pin or unpin.
-    ///   - pinned: `true` to pin, `false` to unpin.
-    public func setWorkspacePinned(id: MobileWorkspacePreview.ID, _ pinned: Bool) async {
-        guard let client = remoteClient else { return }
-        do {
-            let request = try MobileCoreRPCClient.requestData(
-                method: "workspace.action",
-                params: [
-                    "workspace_id": id.rawValue,
-                    "action": pinned ? "pin" : "unpin",
-                    "client_id": clientID,
-                ]
-            )
-            _ = try await client.sendRequest(request)
-        } catch {
-            mobileShellLog.error("workspace pin failed id=\(id.rawValue, privacy: .public) error=\(String(describing: error), privacy: .public)")
-        }
-    }
 
     // MARK: - Notification dismiss-sync
 
@@ -1669,50 +1608,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             mobileShellLog.error("feedback email submit failed error=\(String(describing: error), privacy: .public)")
             return .failed
         }
-    }
-
-    // MARK: - Notification dismiss-sync
-
-    /// Tell the Mac that one or more mirrored notifications were dismissed on
-    /// this phone (a swipe/clear on the delivered banner). The Mac marks them
-    /// read and clears its own banner; its store then emits `notification.dismissed`
-    /// back, which is a harmless no-op for the already-removed phone banner.
-    ///
-    /// Fire-and-forget against the authoritative Mac store. Carries only opaque
-    /// notification UUIDs, never terminal content, so it is safe regardless of
-    /// the Mac's phone-forward hideContent setting.
-    /// - Parameter ids: The stable notification ids the user dismissed.
-    public func dismissNotification(ids: [String]) async {
-        let trimmed = ids
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !trimmed.isEmpty, let client = remoteClient else { return }
-        do {
-            let request = try MobileCoreRPCClient.requestData(
-                method: "notification.dismiss",
-                params: [
-                    "notification_ids": trimmed,
-                    "client_id": clientID,
-                ]
-            )
-            _ = try await client.sendRequest(request)
-        } catch {
-            mobileShellLog.error("notification dismiss sync failed count=\(trimmed.count, privacy: .public) error=\(String(describing: error), privacy: .public)")
-        }
-    }
-
-    /// Clear delivered banners on this phone in response to a Mac-side dismiss
-    /// (`notification.dismissed` peer event). The stable notification id was sent
-    /// to APNs as the `apns-collapse-id`, so the delivered remote notification's
-    /// `request.identifier` equals that id, which is what the injected
-    /// ``DeliveredNotificationClearing`` seam matches on.
-    /// - Parameter ids: The notification ids the Mac dismissed.
-    public func clearDeliveredNotifications(ids: [String]) {
-        let trimmed = ids
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !trimmed.isEmpty else { return }
-        deliveredNotificationClearer.removeDelivered(ids: trimmed)
     }
 
     // MARK: - Network recovery
@@ -2560,150 +2455,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
                 mobileShellLog.error("paired mac store upsert failed: \(String(describing: error), privacy: .public)")
             }
         }
-    }
-
-    /// Recovers the Mac's identity for a connection whose ticket arrived
-    /// without a device id (the minimal v2 pairing QR), as its own
-    /// `mobile.host.status` request with the default RPC timeout.
-    ///
-    /// Identity recovery must not depend on the terminal-output capability
-    /// probe's 750ms best-effort timeout: the probe is allowed to fail fast
-    /// (the terminal just falls back to raw bytes), but the status report is
-    /// the ONLY path that persists a freshly QR-paired Mac, so a slow tailnet
-    /// link that times the probe out must not cost the paired-Mac record and
-    /// reconnect-on-launch. The probe applies identity itself when it
-    /// succeeds (no extra request in the common case) and calls this when it
-    /// cannot, so the recovery request runs with the full RPC timeout. Both
-    /// feed the same guarded
-    /// ``applyHostReportedIdentity(client:deviceID:displayName:)`` path.
-    private func scheduleHostIdentityAdoptionIfNeeded(client: MobileCoreRPCClient) {
-        guard activeTicket?.macDeviceID.isEmpty == true else { return }
-        hostIdentityAdoptionTask?.cancel()
-        hostIdentityAdoptionTask = Task { @MainActor [weak self] in
-            guard let self, !Task.isCancelled, self.remoteClient === client else { return }
-            let data: Data
-            do {
-                data = try await client.sendRequest(
-                    MobileCoreRPCClient.requestData(method: "mobile.host.status", params: [:])
-                )
-            } catch {
-                // The connection (or a reconnect) re-schedules adoption; a
-                // failed status here means the connection itself is in
-                // trouble and its own recovery paths take over.
-                mobileShellLog.error("host identity status request failed: \(String(describing: error), privacy: .private)")
-                return
-            }
-            guard !Task.isCancelled,
-                  let payload = try? MobileHostStatusResponse.decode(data) else { return }
-            await self.applyHostReportedIdentity(
-                client: client,
-                deviceID: payload.macDeviceID,
-                displayName: payload.macDisplayName
-            )
-        }
-    }
-
-    /// Adopts the identity (`mac_device_id`, `mac_display_name`) reported by
-    /// `mobile.host.status`. The minimal pairing QR carries neither, so this
-    /// post-handshake report is what makes a QR-paired Mac identifiable: the
-    /// device id keys the paired-Mac record (launch reconnect, host switcher)
-    /// and the name replaces the placeholder in the UI.
-    ///
-    /// `client` is the connection the status reply belongs to. Every state
-    /// read/mutation re-checks `remoteClient === client` after a suspension,
-    /// so a stale reply (the user re-paired while the request was in flight)
-    /// can never adopt the OLD Mac's identity onto the NEW connection's
-    /// empty-id ticket or persist a mixed paired-Mac record.
-    private func applyHostReportedIdentity(
-        client: MobileCoreRPCClient,
-        deviceID: String?,
-        displayName: String?
-    ) async {
-        guard remoteClient === client else { return }
-        if let reportedID = deviceID?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !reportedID.isEmpty,
-           let ticket = activeTicket,
-           ticket.macDeviceID.isEmpty,
-           let adopted = try? CmxAttachTicket(
-               version: ticket.version,
-               workspaceID: ticket.workspaceID,
-               terminalID: ticket.terminalID,
-               macDeviceID: reportedID,
-               macDisplayName: ticket.macDisplayName,
-               routes: ticket.routes,
-               expiresAt: ticket.expiresAt,
-               authToken: ticket.authToken
-           ) {
-            activeTicket = adopted
-            // The connection is now attributable to a real Mac: persist it so
-            // reconnect-on-launch and the host switcher have a record (the
-            // empty-id ticket was skipped by the connect-time persist).
-            await persistPairedMacFromTicket(
-                adopted,
-                ifStillCurrent: { [weak self] in self?.remoteClient === client }
-            )
-        }
-        guard remoteClient === client else { return }
-        await applyHostReportedDisplayName(
-            displayName,
-            ifStillCurrent: { [weak self] in self?.remoteClient === client }
-        )
-    }
-
-    /// Adopts the Mac name reported by `mobile.host.status`. The pairing QR
-    /// no longer carries the name, so this post-handshake report is what
-    /// replaces the placeholder in the UI and fills in the paired-Mac store
-    /// for freshly paired Macs. The caller has verified the reply belongs to
-    /// the current connection; `ticket` is captured once here so the store
-    /// write stays internally consistent, and `ifStillCurrent` is re-checked
-    /// immediately before that write so a connection change during the name
-    /// application cannot mark a stale Mac active.
-    private func applyHostReportedDisplayName(
-        _ reportedName: String?,
-        ifStillCurrent: (() -> Bool)? = nil
-    ) async {
-        guard let name = reportedName?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !name.isEmpty,
-              let ticket = activeTicket else {
-            return
-        }
-        // The host's report is fresher than whatever the ticket carried (it
-        // reflects the Mac-side pairing-name setting, including renames), so
-        // it always wins over the device-id placeholder or a stale name.
-        connectedHostName = name
-        guard let pairedMacStore,
-              !ticket.macDeviceID.isEmpty,
-              ticket.macDeviceID != "manual-ticket-request",
-              !ticket.macDeviceID.hasPrefix("manual-") else {
-            return
-        }
-        let stackUserID = identityProvider?.currentUserID
-        await performSerializedPairedMacWrite(ifStillCurrent: ifStillCurrent) {
-            do {
-                try await pairedMacStore.upsert(
-                    macDeviceID: ticket.macDeviceID,
-                    displayName: name,
-                    routes: ticket.routes,
-                    markActive: true,
-                    stackUserID: stackUserID
-                )
-            } catch {
-                mobileShellLog.error("paired mac display-name upsert failed: \(String(describing: error), privacy: .public)")
-            }
-        }
-    }
-
-    /// `true` on a physical iPhone/iPad; `false` in the simulator and in
-    /// macOS-hosted package tests. Drives the loopback-pairing rejection:
-    /// the simulator's 127.0.0.1 is the host Mac and dev auto-pair depends
-    /// on it, while a physical device dialing loopback only ever reaches
-    /// itself.
-    private static var isPhysicalDevice: Bool {
-        #if os(iOS) && !targetEnvironment(simulator)
-        true
-        #else
-        false
-        #endif
     }
 
     /// Recovers the Mac's identity for a connection whose ticket arrived
