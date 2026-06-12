@@ -43,6 +43,17 @@ import Testing
         store.signIn()
         store.pairingCode = "debug"
         store.connectPreviewHost()
+        // Group sections are account-scoped: the previous account's group
+        // names must not survive sign-out into the next session.
+        store.workspaceGroups = [
+            MobileWorkspaceGroupPreview(
+                id: "group-1",
+                name: "previous account group",
+                isCollapsed: false,
+                isPinned: false,
+                anchorWorkspaceID: "workspace-main"
+            )
+        ]
 
         store.signOut()
 
@@ -50,6 +61,25 @@ import Testing
         #expect(store.connectionState == .disconnected)
         #expect(store.connectedHostName.isEmpty)
         #expect(store.selectedWorkspace?.name == "cmux")
+        #expect(store.workspaceGroups.isEmpty)
+    }
+
+    @Test func requestOpenWorkspaceSelectsAndBumpsToken() {
+        let store = MobileShellComposite.preview()
+        let target = try! #require(store.workspaces.last?.id)
+
+        #expect(store.pendingWorkspaceOpenRequest == nil)
+        store.requestOpenWorkspace(target)
+        #expect(store.selectedWorkspaceID == target)
+        let first = try! #require(store.pendingWorkspaceOpenRequest)
+        #expect(first.id == target)
+
+        // A repeat open of the already-selected workspace must still bump the
+        // token so the compact stack's `onChange` fires again.
+        store.requestOpenWorkspace(target)
+        let second = try! #require(store.pendingWorkspaceOpenRequest)
+        #expect(second.id == target)
+        #expect(second.token > first.token)
     }
 
     @Test func createWorkspaceSelectsNewWorkspaceAndTerminal() {

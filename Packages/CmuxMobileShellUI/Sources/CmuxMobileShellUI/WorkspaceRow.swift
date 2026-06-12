@@ -9,15 +9,48 @@ struct WorkspaceRow: View {
     /// When `true`, the workspace title wraps onto multiple lines instead of
     /// truncating to one (driven by the "Wrap Workspace Titles" setting).
     let wrapWorkspaceTitles: Bool
+    /// How many lines the activity preview shows (1 or 2, driven by the
+    /// "Preview Lines" setting; 2 is the default). Space is reserved so rows
+    /// with short previews keep the same height as their neighbors.
+    var previewLineLimit: Int = MobileDisplaySettings.defaultWorkspacePreviewLineCount
+    /// When `true`, the user has muted phone push for this workspace; the row
+    /// shows a `bell.slash` glyph so the muted state is visible at a glance.
+    /// Passed as a value snapshot so no `@Observable` store crosses the `List`
+    /// boundary.
+    var isMuted: Bool = false
+    /// Unread-notification count for this workspace. Passed in as a plain value
+    /// (not derived from a store inside the row) so no `@Observable` notifications
+    /// store crosses the `List` snapshot boundary. `0` hides the badge.
+    var unreadCount: Int = 0
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            WorkspaceAvatar(workspace: workspace)
+            // Unread is JUST this dot, left of the icon like iMessage. The
+            // gutter is always present (hidden dot when read) so read and
+            // unread rows line up. Centered against the avatar's height.
+            WorkspaceUnreadDot(isUnread: workspace.hasUnread)
+                .frame(height: 48)
+
+            ZStack(alignment: .topTrailing) {
+                WorkspaceAvatar(workspace: workspace)
+                if unreadCount > 0 {
+                    UnreadBadge(count: unreadCount)
+                        .alignmentGuide(.top) { $0[.top] - 4 }
+                        .alignmentGuide(.trailing) { $0[.trailing] + 4 }
+                }
+            }
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     if workspace.isPinned {
                         Image(systemName: "pin.fill")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .accessibilityHidden(true)
+                    }
+
+                    if isMuted {
+                        Image(systemName: "bell.slash.fill")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                             .accessibilityHidden(true)
@@ -30,16 +63,22 @@ struct WorkspaceRow: View {
 
                     Spacer(minLength: 8)
 
-                    Text(workspace.timestampOrStatus(connectionStatus: connectionStatus))
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    // TimelineView re-evaluates the label every minute so a
+                    // quiet row's relative time ("now" -> "1m" -> ...) advances
+                    // without waiting for an unrelated state change to
+                    // invalidate the row. Minute granularity matches the label.
+                    TimelineView(.everyMinute) { context in
+                        Text(workspace.timestampOrStatus(connectionStatus: connectionStatus, now: context.date))
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                    }
                 }
 
                 Text(workspace.previewLine)
                     .font(.subheadline)
                     .foregroundStyle(.secondary)
-                    .lineLimit(1)
+                    .lineLimit(previewLineLimit, reservesSpace: true)
 
                 HStack(spacing: 6) {
                     Circle()
@@ -63,6 +102,36 @@ struct WorkspaceRow: View {
             }
         }
         .contentShape(Rectangle())
+    }
+}
+
+/// A small red unread-count pill, capped at "99+". Used as the per-workspace
+/// badge on the avatar and is reusable wherever an unread count is shown.
+struct UnreadBadge: View {
+    let count: Int
+
+    private var label: String {
+        count > 99 ? "99+" : String(count)
+    }
+
+    var body: some View {
+        Text(label)
+            .font(.caption2.weight(.semibold))
+            .monospacedDigit()
+            .foregroundStyle(.white)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 1)
+            .frame(minWidth: 18)
+            .background(Color.red, in: Capsule())
+            .accessibilityLabel(
+                String(
+                    format: L10n.string(
+                        "mobile.notifications.unreadCountFormat",
+                        defaultValue: "%d unread"
+                    ),
+                    count
+                )
+            )
     }
 }
 

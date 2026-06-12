@@ -443,6 +443,8 @@ jobs:
             CmuxFileWatch
             CmuxFoundation
             CmuxGit
+            CmuxMobileShell
+            CmuxMobileTerminalKit
             CmuxProcess
             CmuxSettings
             CmuxSettingsUI

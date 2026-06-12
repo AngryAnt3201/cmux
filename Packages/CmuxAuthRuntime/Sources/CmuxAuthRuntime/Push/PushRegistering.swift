@@ -21,6 +21,38 @@ public protocol PushRegistering: Sendable {
     /// Re-upload the cached token (e.g. after sign-in). No-op unless opted in.
     func syncTokenIfPossible() async
 
-    /// Remove the cached token from the server (on disable or sign-out).
+    /// Remove the cached token from the server (on disable, while still
+    /// signed in), authenticating through the live token provider.
     func unregisterFromServer() async
+
+    /// The set of workspace ids the currently signed-in user has muted for phone
+    /// push. Push for a muted workspace is dropped server-side so a noisy
+    /// workspace never reaches the phone, even while it is backgrounded or
+    /// locked. The cache is namespaced by user id, so this always reflects the
+    /// active account.
+    var mutedWorkspaceIDs: Set<String> { get async }
+
+    /// Mute or unmute a workspace for phone push for the signed-in user,
+    /// persisting under that user's namespaced key and syncing the full muted set
+    /// to the cmux web API. Because the persisted key is per-user, a write started
+    /// under one account never lands in another account's cache. Concurrent
+    /// toggles are coalesced into a single in-flight PUT.
+    func setWorkspaceMuted(_ workspaceId: String, muted: Bool) async
+
+    /// Pull the authoritative muted set from the server and replace the signed-in
+    /// user's namespaced cache with it (call on sign-in). No-op (keeps local)
+    /// when signed out or on a network failure, so an offline sign-in never wipes
+    /// a valid local set, and a stale local mutation for the same user is not
+    /// clobbered.
+    /// - Returns: the muted set after hydration (server set on success, the
+    ///   unchanged local set otherwise).
+    @discardableResult
+    func hydrateMutedWorkspacesFromServer() async -> Set<String>
+    /// Remove the cached token from the server on the sign-out path,
+    /// authenticating ONLY with the credentials captured before the
+    /// local-first sign-out cleared the live token provider. When either
+    /// captured token is missing the request is skipped: falling back to the
+    /// live provider could authenticate as a NEXT account whose sign-in raced
+    /// the bounded teardown.
+    func unregisterFromServer(accessToken: String?, refreshToken: String?) async
 }
