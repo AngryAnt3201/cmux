@@ -1,7 +1,8 @@
+internal import CMUXMobileCore
 internal import CmuxMobileDiagnostics
 internal import CmuxMobileShellModel
 internal import CmuxMobileRPC
-internal import Foundation
+public import Foundation
 internal import OSLog
 
 private let mobileShellLog = Logger(
@@ -30,6 +31,12 @@ extension MobileShellComposite {
     ///   - text: An optional freeform note from the user.
     ///   - debugLogText: The string debug-log snapshot (from `MobileDebugLog`).
     ///   - terminalText: The visible terminal text (from `GhosttySurfaceView`).
+    ///   - answersJSON: The P2 multiple-choice answers as canonical JSON
+    ///     (``CmuxMobileShellModel/DogfoodFeedbackAnswers``), or `nil` for the P1
+    ///     freeform-only path. An old (P1-only) Mac ignores the extra key.
+    ///   - screenshotPNG: The P2 chrome screenshot PNG (the terminal renders
+    ///     blank in a UIView snapshot, which is why the terminal *text* is sent
+    ///     too), or `nil`. Sent base64; an old Mac ignores the extra key.
     ///   - buildStamp: The build-identity stamp (build type + version + OS +
     ///     device) written into the bundle. Defaults to the diagnostic log's
     ///     stamp when not supplied.
@@ -39,6 +46,8 @@ extension MobileShellComposite {
         text: String,
         debugLogText: String,
         terminalText: String,
+        answersJSON: Data? = nil,
+        screenshotPNG: Data? = nil,
         buildStamp: String? = nil
     ) async -> Bool {
         guard let client = remoteClient else { return false }
@@ -58,7 +67,9 @@ extension MobileShellComposite {
                     terminalText: terminalText,
                     buildStamp: buildStamp,
                     clientID: clientID,
-                    diagnosticBlob: diagnosticBlob
+                    diagnosticBlob: diagnosticBlob,
+                    answersJSON: answersJSON,
+                    screenshotPNG: screenshotPNG
                 )
             }.value
         } catch {
@@ -82,20 +93,36 @@ extension MobileShellComposite {
     nonisolated private static let dogfoodFeedbackMaxTextChars = 16_384
     nonisolated private static let dogfoodFeedbackMaxTerminalChars = 262_144
     nonisolated private static let dogfoodFeedbackMaxDebugLogChars = 1_048_576
+    /// Drop the answers JSON past this size before attaching it, mirroring the
+    /// Mac sink's `answers_json` cap. The freeform note rides inside the answers
+    /// payload, so without this a pasted multi-MiB note would serialize and ship
+    /// uncapped (the separate `text` field is capped, but the same note is here
+    /// too). 64 KiB matches the Mac's `dogfoodFeedbackMaxAnswersChars`.
+    nonisolated private static let dogfoodFeedbackMaxAnswersBytes = 65_536
+    /// Drop a screenshot larger than this before encoding it, mirroring the Mac
+    /// sink's blob byte cap so a huge PNG can't be base64'd into a multi-MiB
+    /// request on the phone. A dropped screenshot still ships the rest of the
+    /// bundle (text + terminal + answers + diagnostics).
+    nonisolated private static let dogfoodFeedbackMaxScreenshotBytes = 6_291_456 // 6 MiB
 
     /// Combine the structured + string diagnostics into one self-contained blob,
-    /// base64-encode it, and build the RPC request — all off the main actor.
+    /// base64-encode it, attach the optional P2 answers + screenshot, and build
+    /// the RPC request — all off the main actor.
     ///
     /// The string debug log rides inside the same diagnostic file as the compact
     /// structured rows (rows, a divider, then the human-readable log) so the Mac
-    /// bundle is self-contained. Inputs are size-capped first.
+    /// bundle is self-contained. Inputs are size-capped first. The P2 fields are
+    /// added only when present, so a P1 freeform-only submit produces the exact
+    /// same params it did before (and an old Mac ignores the new keys).
     nonisolated private static func buildDogfoodFeedbackRequest(
         text: String,
         debugLogText: String,
         terminalText: String,
         buildStamp: String,
         clientID: String,
-        diagnosticBlob: Data
+        diagnosticBlob: Data,
+        answersJSON: Data?,
+        screenshotPNG: Data?
     ) throws -> Data {
         let cappedText = String(text.prefix(dogfoodFeedbackMaxTextChars))
         let cappedTerminal = String(terminalText.prefix(dogfoodFeedbackMaxTerminalChars))
@@ -105,16 +132,56 @@ extension MobileShellComposite {
             combined.append(Data("\n----- mobile debug log -----\n".utf8))
             combined.append(Data(cappedDebugLog.utf8))
         }
-        return try MobileCoreRPCClient.requestData(
+        var params: [String: Any] = [
+            "text": cappedText,
+            "terminal_text": cappedTerminal,
+            "build_stamp": buildStamp,
+            "diagnostic_blob_base64": combined.base64EncodedString(),
+            "client_id": clientID,
+        ]
+        // Attach the answers JSON, keeping it under the Mac-side cap WITHOUT ever
+        // dropping the structured MC answers (the dogfooder's actual responses).
+        // The freeform note is the only unbounded contributor here, so if the
+        // encoded payload is over the byte cap, re-encode with a shrunk note that
+        // leaves room for the MC rows. The note also ships in the capped `text`
+        // field, so trimming it here loses nothing the bundle does not already
+        // carry. The model already byte-caps the note, so this is a backstop for
+        // a pathologically large agent-pushed checklist.
+        if let answersString = Self.cappedAnswersJSONString(
+            answersJSON,
+            maxBytes: dogfoodFeedbackMaxAnswersBytes
+        ) {
+            params["answers_json"] = answersString
+        }
+        // Attach the screenshot only if the *whole request frame* still fits the
+        // mobile transport's frame limit. The screenshot is the largest and most
+        // droppable field, and the diagnostic blob + terminal text + answers can
+        // already consume much of the budget, so a screenshot that passes its own
+        // byte cap could still push the frame over `defaultMaximumFrameByteCount`
+        // and make the transport throw `frameTooLarge` — failing the whole submit
+        // instead of just dropping the screenshot. So: build the request without
+        // the screenshot first, then re-add it only when the larger request still
+        // fits (with header + margin). This keeps the rest of the bundle shipping
+        // even when the screenshot has to be dropped.
+        let requestWithoutScreenshot = try MobileCoreRPCClient.requestData(
             method: "dogfood.feedback.submit",
-            params: [
-                "text": cappedText,
-                "terminal_text": cappedTerminal,
-                "build_stamp": buildStamp,
-                "diagnostic_blob_base64": combined.base64EncodedString(),
-                "client_id": clientID,
-            ]
+            params: params
         )
+        guard let screenshotPNG, screenshotPNG.count <= dogfoodFeedbackMaxScreenshotBytes else {
+            return requestWithoutScreenshot
+        }
+        let screenshotBase64 = screenshotPNG.base64EncodedString()
+        params["screenshot_png_base64"] = screenshotBase64
+        let requestWithScreenshot = try MobileCoreRPCClient.requestData(
+            method: "dogfood.feedback.submit",
+            params: params
+        )
+        let frameBudget = MobileSyncFrameCodec.defaultMaximumFrameByteCount - MobileSyncFrameCodec.headerByteCount
+        if requestWithScreenshot.count <= frameBudget {
+            return requestWithScreenshot
+        }
+        // The screenshot would overflow the frame; ship the rest without it.
+        return requestWithoutScreenshot
     }
 }
 
