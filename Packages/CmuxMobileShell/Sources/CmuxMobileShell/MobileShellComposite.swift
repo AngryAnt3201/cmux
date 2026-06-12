@@ -581,6 +581,13 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     /// Tail of the serialized paired-Mac store write chain; see
     /// ``performSerializedPairedMacWrite(ifStillCurrent:_:)``.
     private var pairedMacWriteChain: Task<Void, Never>?
+    /// The in-flight `mobile.events.subscribe` (reason `start`) ack for the
+    /// current listener generation. It runs concurrently with the consumer
+    /// loop (the ack is a server-side enable handshake, not a delivery
+    /// precondition: a prior generation's server subscription keeps pushing
+    /// across re-subscribes) so events arriving during the round-trip are
+    /// consumed, not buffered invisibly behind the await.
+    private var terminalSubscriptionStartTask: Task<Void, Never>?
     // Liveness watchdog for the render-grid push subscription. The `for await`
     // listener loop blocks indefinitely if the underlying connection half-dies
     // (network blip, Mac stops pushing, background/foreground cycle): the
@@ -4144,11 +4151,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
                 topics: topics,
                 transport: outputTransport
             )
-            // Lane 3 of dismiss-sync: every (re)subscribe — initial connect,
-            // app foreground, network recovery, liveness restart — runs one
-            // reconcile sweep so banners/badge heal anything missed while the
-            // app was closed or detached.
-            self?.scheduleNotificationReconcile(client: client)
             // Lane 3 of dismiss-sync: every (re)subscribe — initial connect,
             // app foreground, network recovery, liveness restart — runs one
             // reconcile sweep so banners/badge heal anything missed while the
