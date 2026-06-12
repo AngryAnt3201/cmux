@@ -205,9 +205,8 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     public var workspaces: [MobileWorkspacePreview] {
         didSet { workspaceTopologyVersion &+= 1 }
     }
-    /// Bumped on every ``workspaces`` mutation: a cheap "workspace/terminal
-    /// lists may have changed" signal (e.g. for retrying a parked notification
-    /// deep link) that avoids allocating ID arrays per body evaluation.
+    /// Bumped on every ``workspaces`` mutation: a cheap "lists may have
+    /// changed" signal (e.g. for retrying a parked notification deep link).
     public private(set) var workspaceTopologyVersion: UInt64 = 0
     /// Phone-side mirror of the Mac's notification feed. Streamed live over the
     /// `notifications.updated` event topic (snapshot refetched via
@@ -581,13 +580,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
     /// Tail of the serialized paired-Mac store write chain; see
     /// ``performSerializedPairedMacWrite(ifStillCurrent:_:)``.
     private var pairedMacWriteChain: Task<Void, Never>?
-    /// The in-flight `mobile.events.subscribe` (reason `start`) ack for the
-    /// current listener generation. It runs concurrently with the consumer
-    /// loop (the ack is a server-side enable handshake, not a delivery
-    /// precondition: a prior generation's server subscription keeps pushing
-    /// across re-subscribes) so events arriving during the round-trip are
-    /// consumed, not buffered invisibly behind the await.
-    private var terminalSubscriptionStartTask: Task<Void, Never>?
     // Liveness watchdog for the render-grid push subscription. The `for await`
     // listener loop blocks indefinitely if the underlying connection half-dies
     // (network blip, Mac stops pushing, background/foreground cycle): the
@@ -4726,15 +4718,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             guard let request else { return }
             _ = try? await client.sendRequest(request)
         }
-    }
-
-    func workspaceID(forTerminalID terminalID: String) -> MobileWorkspacePreview.ID? {
-        for workspace in workspaces {
-            if workspace.terminals.contains(where: { $0.id.rawValue == terminalID }) {
-                return workspace.id
-            }
-        }
-        return nil
     }
 
     private func handleTerminalRenderGridEvent(_ event: MobileEventEnvelope) {
