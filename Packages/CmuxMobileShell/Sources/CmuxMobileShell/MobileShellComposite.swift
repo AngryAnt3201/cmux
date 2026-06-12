@@ -1027,6 +1027,62 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
         }
     }
 
+    // MARK: - Workspace actions
+
+    /// Rename a workspace on the Mac.
+    ///
+    /// Fire-and-forget against the authoritative state: the Mac applies the title
+    /// and its workspace-list observer pushes `workspace.updated`, which refreshes
+    /// this list. No local optimistic mutation, so overlapping actions can never
+    /// leave stale state.
+    /// - Parameters:
+    ///   - id: The workspace to rename.
+    ///   - title: The new title. Whitespace-only titles are ignored.
+    public func renameWorkspace(id: MobileWorkspacePreview.ID, title: String) async {
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, let client = remoteClient else { return }
+        do {
+            let request = try MobileCoreRPCClient.requestData(
+                method: "workspace.action",
+                params: [
+                    "workspace_id": id.rawValue,
+                    "action": "rename",
+                    "title": trimmed,
+                    "client_id": clientID,
+                ]
+            )
+            _ = try await client.sendRequest(request)
+        } catch {
+            mobileShellLog.error("workspace rename failed id=\(id.rawValue, privacy: .public) error=\(String(describing: error), privacy: .public)")
+        }
+    }
+
+    /// Pin or unpin a workspace on the Mac.
+    ///
+    /// Fire-and-forget against the authoritative state: the Mac toggles the pin
+    /// and its workspace-list observer (which watches `$isPinned`) pushes
+    /// `workspace.updated`, which refreshes this list. No local optimistic
+    /// mutation, so overlapping pin/unpin taps can never leave stale state.
+    /// - Parameters:
+    ///   - id: The workspace to pin or unpin.
+    ///   - pinned: `true` to pin, `false` to unpin.
+    public func setWorkspacePinned(id: MobileWorkspacePreview.ID, _ pinned: Bool) async {
+        guard let client = remoteClient else { return }
+        do {
+            let request = try MobileCoreRPCClient.requestData(
+                method: "workspace.action",
+                params: [
+                    "workspace_id": id.rawValue,
+                    "action": pinned ? "pin" : "unpin",
+                    "client_id": clientID,
+                ]
+            )
+            _ = try await client.sendRequest(request)
+        } catch {
+            mobileShellLog.error("workspace pin failed id=\(id.rawValue, privacy: .public) error=\(String(describing: error), privacy: .public)")
+        }
+    }
+
     // MARK: - Feedback routing
 
     /// An all-empty stamp used when no app-layer provider is injected (previews /
@@ -4227,6 +4283,11 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
             // connect. Live updates then arrive via `notifications.updated`.
             self.scheduleNotificationsRefreshFromEvent()
             MobileDebugLog.anchormux("sync.subscribe_ok topics=\(topics.count) transport=\(transport)")
+            // Lane 3 of dismiss-sync: every successful (re)subscribe — initial
+            // connect, app foreground, network recovery, liveness restart —
+            // runs one reconcile sweep so banners/badge heal anything missed
+            // while the app was closed or detached.
+            self.scheduleNotificationReconcile(client: client)
         }
     }
 
@@ -4757,6 +4818,32 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
         // Empty-byte frames still flow: a no-row-change frame carries the
         // active screen.
         deliverTerminalFrame(renderGrid, bytes: bytes)
+    }
+
+    private func handleNotificationDismissedEvent(_ event: MobileEventEnvelope) async {
+        guard
+            let json = event.payloadJSON,
+            let payload = MobileNotificationDismissedEvent.decode(json)
+        else {
+            return
+        }
+        if !payload.ids.isEmpty {
+            await clearDeliveredNotifications(ids: payload.ids)
+        }
+        if let unreadCount = payload.unreadCount {
+            applyAuthoritativeUnreadBadge(unreadCount)
+        }
+    }
+
+    private func handleNotificationBadgeEvent(_ event: MobileEventEnvelope) {
+        guard
+            let json = event.payloadJSON,
+            let payload = MobileNotificationBadgeEvent.decode(json),
+            let unreadCount = payload.unreadCount
+        else {
+            return
+        }
+        applyAuthoritativeUnreadBadge(unreadCount)
     }
 
     private func handleNotificationDismissedEvent(_ event: MobileEventEnvelope) async {

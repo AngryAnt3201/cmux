@@ -21,7 +21,7 @@
 6071	Sources/TextBoxInput.swift
 5482	cmuxTests/BrowserConfigTests.swift
 5462	Sources/cmuxApp.swift
-5206	Packages/CmuxMobileShell/Sources/CmuxMobileShell/MobileShellComposite.swift
+5293	Packages/CmuxMobileShell/Sources/CmuxMobileShell/MobileShellComposite.swift
 4460	Sources/Panels/FilePreviewPanel.swift
 4400	cmuxTests/BrowserPanelTests.swift
 4227	Sources/BrowserWindowPortal.swift
@@ -115,6 +115,7 @@
 739	Sources/App/MenuBarExtraController.swift
 738	Packages/CMUXProjectModel/Sources/CMUXProjectModel/XcodeProjectAdapter.swift
 738	Packages/CmuxAuthRuntime/Sources/CmuxAuthRuntime/Coordinator/AuthCoordinator.swift
+717	Packages/CmuxAuthRuntime/Tests/CmuxAuthRuntimeTests/PushRegistrationServiceTests.swift
 716	Sources/TaskManagerSnapshot.swift
 714	Sources/AppleScriptSupport.swift
 708	Sources/TerminalSSHSessionDetector.swift
@@ -133,7 +134,6 @@
 680	Sources/FileExplorerSearchController.swift
 679	cmuxTests/KeyboardShortcutContextTests.swift
 668	cmuxTests/FeedCoordinatorTests.swift
-667	Packages/CmuxAuthRuntime/Tests/CmuxAuthRuntimeTests/PushRegistrationServiceTests.swift
 654	Packages/CmuxSettingsUI/Sources/CmuxSettingsUI/Sections/KeyboardShortcutsSection.swift
 650	Sources/Panels/MarkdownRemoteImageLoader.swift
 649	Sources/CmuxTopSnapshot.swift
