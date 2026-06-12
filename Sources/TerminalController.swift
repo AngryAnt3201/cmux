@@ -14372,7 +14372,7 @@ class TerminalController {
         ])
     }
 
-    private func v2MobileTerminalMouse(params: [String: Any]) -> V2CallResult {
+    func v2MobileTerminalMouse(params: [String: Any]) -> V2CallResult {
         if let error = mobileWorkspaceIDValidationError(params: params) {
             return error
         }

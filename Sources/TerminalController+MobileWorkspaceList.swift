@@ -1,4 +1,5 @@
 import AppKit
+import CmuxControlSocket
 import Foundation
 
 // MARK: - Mobile workspace list (iOS-facing payloads)
@@ -13,17 +14,30 @@ extension TerminalController {
     /// toggle a section open/closed, but cannot create, rename, or restructure
     /// groups. This requires an explicit, resolvable `group_id` (it must never
     /// fall back to the Mac's selected group) and delegates to the same
-    /// `v2WorkspaceGroupSetCollapsed` the CLI and sidebar use, so the mutation
-    /// path stays shared. `v2ResolveTabManager` routes by `group_id` to the
-    /// owning window even in the multi-window case.
+    /// `controlSetWorkspaceGroupCollapsed` seam the socket coordinator uses for
+    /// `workspace.group.collapse`/`expand`, so the mutation path stays shared.
+    /// The group-scoped `ControlRoutingSelectors` routes to the owning window
+    /// even in the multi-window case (same precedence as the legacy resolver).
     func v2MobileWorkspaceGroupSetCollapsed(params: [String: Any], isCollapsed: Bool) -> V2CallResult {
-        guard v2HasNonNullParam(params, "group_id") else {
+        guard v2HasNonNullParam(params, "group_id"), let groupID = v2UUID(params, "group_id") else {
             return .err(code: "invalid_params", message: "Missing or invalid group_id", data: nil)
         }
-        guard v2UUID(params, "group_id") != nil else {
-            return .err(code: "invalid_params", message: "Missing or invalid group_id", data: nil)
+        let routing = ControlRoutingSelectors(
+            hasWindowIDParam: false,
+            windowID: nil,
+            groupID: groupID,
+            workspaceID: nil,
+            surfaceID: nil,
+            paneID: nil
+        )
+        guard let ok = controlSetWorkspaceGroupCollapsed(
+            routing: routing, groupID: groupID, isCollapsed: isCollapsed
+        ) else {
+            return .err(code: "unavailable", message: "TabManager not available", data: nil)
         }
-        return v2WorkspaceGroupSetCollapsed(params: params, isCollapsed: isCollapsed)
+        return ok
+            ? .ok(["group_id": groupID.uuidString, "is_collapsed": isCollapsed])
+            : .err(code: "not_found", message: "Group not found", data: ["group_id": groupID.uuidString])
     }
 
     func v2MobileWorkspaceList(
