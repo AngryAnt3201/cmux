@@ -36,8 +36,7 @@ struct MobileTabContainer: View {
         TabView(selection: $selectedTab) {
             WorkspaceShellView(
                 store: store,
-                signOut: signOut,
-                unreadCountsByWorkspace: store.notificationsStore.unreadCountsByWorkspace()
+                signOut: signOut
             )
             .tabItem {
                 Label(
