@@ -294,8 +294,8 @@ final class OutputCollector {
 
     func mount(store: MobileShellComposite, surfaceID: String) {
         task = Task { @MainActor [weak self] in
-            for await data in store.terminalOutputStream(surfaceID: surfaceID) {
-                self?.lines.append(String(decoding: data, as: UTF8.self))
+            for await chunk in store.terminalOutputStream(surfaceID: surfaceID) {
+                self?.lines.append(String(decoding: chunk.bytes, as: UTF8.self))
             }
         }
     }

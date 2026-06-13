@@ -109,7 +109,11 @@ struct WorkspaceDetailView: View {
                     // field).
                     autoFocusOnWindowAttach: store.shouldAutoFocusTerminalSurface(terminalID)
                         && !store.isComposerPresented,
-                    isComposerActive: store.isComposerPresented
+                    isComposerActive: store.isComposerPresented,
+                    // Read in the body so a scrolled-up change re-renders the
+                    // representable, pushing the new state into the surface to
+                    // toggle the floating jump-to-bottom button.
+                    scrolledUp: store.terminalScrolledUp(surfaceID: terminalID)
                 )
                 // Identity must track the selected terminal. The representable's
                 // coordinator binds its byte sink to the surfaceID at make time and
@@ -516,3 +520,4 @@ struct WorkspaceDetailView: View {
         UIApplication.shared.dismissMobileKeyboard()
     }
 }
+

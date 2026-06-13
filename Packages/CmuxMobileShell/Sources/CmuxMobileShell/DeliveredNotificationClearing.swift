@@ -37,15 +37,21 @@ public protocol DeliveredNotificationClearing: Sendable {
     func setBadgeCount(_ count: Int)
 }
 
-/// No-op ``DeliveredNotificationClearing`` for preview stores.
-///
-/// A preview/test store must never mutate the real system notification
-/// center or app badge, and `UNUserNotificationCenter.current()` traps in
-/// processes without a bundle proxy (e.g. `swift test`), so
-/// ``MobileShellComposite/preview(runtime:)`` injects this instead of
-/// ``SystemDeliveredNotificationClearer``.
-struct NoopDeliveredNotificationClearer: DeliveredNotificationClearing {
-    func removeDelivered(ids: [String]) async {}
-    func deliveredIdentifiers() async -> [String] { [] }
-    func setBadgeCount(_ count: Int) {}
+/// Inert ``DeliveredNotificationClearing`` for previews and tests that do not
+/// assert on the system-notification surface. ``MobileShellComposite/preview(runtime:)``
+/// injects it so preview/test stores never touch `UNUserNotificationCenter`,
+/// which raises an Objective-C exception in processes without an app bundle
+/// (e.g. the SwiftPM test host).
+public struct NoopDeliveredNotificationClearer: DeliveredNotificationClearing {
+    /// Creates an inert clearer.
+    public init() {}
+
+    /// No-op.
+    public func removeDelivered(ids: [String]) async {}
+
+    /// Always empty: a preview/test store reconciles against no banners.
+    public func deliveredIdentifiers() async -> [String] { [] }
+
+    /// No-op.
+    public func setBadgeCount(_ count: Int) {}
 }
