@@ -5179,32 +5179,6 @@ public final class MobileShellComposite: MobileTerminalOutputSinking {
         applyAuthoritativeUnreadBadge(unreadCount)
     }
 
-    private func handleNotificationDismissedEvent(_ event: MobileEventEnvelope) async {
-        guard
-            let json = event.payloadJSON,
-            let payload = MobileNotificationDismissedEvent.decode(json)
-        else {
-            return
-        }
-        if !payload.ids.isEmpty {
-            await clearDeliveredNotifications(ids: payload.ids)
-        }
-        if let unreadCount = payload.unreadCount {
-            applyAuthoritativeUnreadBadge(unreadCount)
-        }
-    }
-
-    private func handleNotificationBadgeEvent(_ event: MobileEventEnvelope) {
-        guard
-            let json = event.payloadJSON,
-            let payload = MobileNotificationBadgeEvent.decode(json),
-            let unreadCount = payload.unreadCount
-        else {
-            return
-        }
-        applyAuthoritativeUnreadBadge(unreadCount)
-    }
-
     private func handleTerminalBytesEvent(_ event: MobileEventEnvelope) {
         guard
             let json = event.payloadJSON,
