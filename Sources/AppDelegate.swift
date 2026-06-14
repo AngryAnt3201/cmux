@@ -1115,6 +1115,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCent
         }
         StartupBreadcrumbLog.append("appDelegate.didFinish.activationPolicy.synced")
 
+        // OG Maestro tamagotchi: a floating pixel-mascot companion.
+        if !isRunningUnderXCTest {
+            DispatchQueue.main.async { TamagotchiCompanion.shared.show() }
+        }
+
         // Prewarm the shared restorable-agent index off the main thread so the first
         // tab/workspace/window close after launch reads a warm cache instead of paying a
         // synchronous RestorableAgentSessionIndex.load() on the main thread. See
@@ -17910,5 +17915,82 @@ extension AppDelegate {
         origin.y = max(visible.minY, min(origin.y, visible.maxY - height))
         let frame = NSRect(x: origin.x, y: origin.y, width: width, height: height).integral
         window.setFrame(frame, display: true, animate: false)
+    }
+}
+
+// MARK: - OG Maestro tamagotchi companion
+//
+// Ported from Maestro's pixel mascot. The art (usage_state_0…4) lives in the
+// asset catalog; mood maps 1:1 to those states. Kept self-contained in this
+// already-compiled file so it needs no project-file changes.
+
+/// Mood states, matching the OG Maestro `usage_state_N` art.
+private enum TamagotchiMood: Int, CaseIterable {
+    case sleeping = 0, hungry = 1, bored = 2, content = 3, happy = 4
+    var assetName: String { "usage_state_\(rawValue)" }
+}
+
+private struct TamagotchiCompanionView: View {
+    @State private var mood: TamagotchiMood = .content
+    @State private var bob = false
+
+    var body: some View {
+        Image(mood.assetName)
+            .interpolation(.none)
+            .resizable()
+            .scaledToFit()
+            .frame(width: 72, height: 72)
+            .offset(y: bob ? -3 : 0)
+            .animation(.easeInOut(duration: 0.7).repeatForever(autoreverses: true), value: bob)
+            .padding(8)
+            .contentShape(Rectangle())
+            .onAppear { bob = true }
+            .onTapGesture {
+                // Pet it — cycle through the moods.
+                let all = TamagotchiMood.allCases
+                let next = (all.firstIndex(of: mood).map { ($0 + 1) % all.count }) ?? 0
+                mood = all[next]
+            }
+            .help("Maestro")
+    }
+}
+
+/// Owns a small floating panel hosting the mascot, pinned to the bottom-left of
+/// the active window. Only visible while cmux is frontmost.
+@MainActor
+final class TamagotchiCompanion {
+    static let shared = TamagotchiCompanion()
+    private var panel: NSPanel?
+
+    func show() {
+        if let panel {
+            position(panel)
+            panel.orderFront(nil)
+            return
+        }
+        let size = NSSize(width: 96, height: 96)
+        let p = NSPanel(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        p.isFloatingPanel = true
+        p.level = .floating
+        p.backgroundColor = .clear
+        p.isOpaque = false
+        p.hasShadow = false
+        p.isMovableByWindowBackground = true
+        p.hidesOnDeactivate = true
+        p.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        p.contentView = NSHostingView(rootView: TamagotchiCompanionView())
+        panel = p
+        position(p)
+        p.orderFront(nil)
+    }
+
+    private func position(_ p: NSPanel) {
+        let anchor = NSApp.mainWindow?.frame ?? NSScreen.main?.visibleFrame ?? .zero
+        p.setFrameOrigin(NSPoint(x: anchor.minX + 12, y: anchor.minY + 12))
     }
 }
