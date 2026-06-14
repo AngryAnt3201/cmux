@@ -1002,6 +1002,26 @@ if [[ -n "${TAG_APP_FINAL_PATH:-}" && -n "${TAG_APP_STAGING_PATH:-}" ]]; then
   mv "$TAG_APP_STAGING_PATH" "$TAG_APP_FINAL_PATH"
   APP_PATH="$TAG_APP_FINAL_PATH"
 fi
+
+# Optional: re-sign the freshly built app with a stable team identity so macOS
+# TCC grants (notably Full Disk Access) persist across rebuilds. The adhoc
+# signature above is cdhash-keyed and resets every build, which forces FDA to be
+# re-granted each time. Opt in by exporting:
+#   CMUX_DEV_SIGN_IDENTITY="Apple Development: <Your Name> (XXXXXXXXXX)"
+# No-op for anyone who hasn't set it, so it's safe for other contributors/CI.
+if [[ -n "${CMUX_DEV_SIGN_IDENTITY:-}" ]]; then
+  RELOAD_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+  DEV_SIGN_ENT="$(mktemp -t cmux-dev-sign).plist"
+  cp "$RELOAD_REPO_ROOT/cmux.entitlements" "$DEV_SIGN_ENT"
+  # Drop entitlements that require a provisioning profile (would block local launch).
+  /usr/libexec/PlistBuddy -c "Delete :com.apple.developer.web-browser.public-key-credential" "$DEV_SIGN_ENT" >/dev/null 2>&1 || true
+  if /usr/bin/codesign --force --deep --entitlements "$DEV_SIGN_ENT" --sign "$CMUX_DEV_SIGN_IDENTITY" "$APP_PATH" >/dev/null 2>&1; then
+    echo "Re-signed with stable identity ($CMUX_DEV_SIGN_IDENTITY) — Full Disk Access grant persists across rebuilds."
+  else
+    echo "warning: stable-identity re-sign failed; continuing with the adhoc signature" >&2
+  fi
+  rm -f "$DEV_SIGN_ENT"
+fi
 CLI_PATH="$APP_PATH/Contents/Resources/bin/cmux"
 if [[ -x "$CLI_PATH" ]]; then
   echo "$CLI_PATH" > /tmp/cmux-last-cli-path || true
