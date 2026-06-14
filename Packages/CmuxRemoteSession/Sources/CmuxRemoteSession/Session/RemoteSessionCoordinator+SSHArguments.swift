@@ -14,9 +14,12 @@ extension RemoteSessionCoordinator {
             return normalizedSSHOptions(configuration.sshOptions)
         }()
         var args: [String] = [
-            "-o", "ConnectTimeout=6",
-            "-o", "ServerAliveInterval=20",
-            "-o", "ServerAliveCountMax=2",
+            // Tolerant timeouts for jittery links (e.g. Wi-Fi/Tailscale): a longer
+            // connect window and ~120s keepalive grace ride out transient drops
+            // instead of churning through reconnect attempts.
+            "-o", "ConnectTimeout=20",
+            "-o", "ServerAliveInterval=15",
+            "-o", "ServerAliveCountMax=8",
         ]
         if !hasSSHOptionKey(effectiveSSHOptions, key: "StrictHostKeyChecking") {
             args += ["-o", "StrictHostKeyChecking=accept-new"]
